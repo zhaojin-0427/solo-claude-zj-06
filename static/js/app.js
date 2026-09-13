@@ -16,7 +16,8 @@ const state = {
   pweights: Object.fromEntries([...Array(7)].map((_, i) => [i + 2, 1])),
   result: null,
   locks: new Map(),             // m -> cents (拖过的)
-  playing: null,                // {root, up, raf, endAt}
+  playing: null,                // {root, up, raf, token}
+  playToken: 0,
   sessionId: null,
   schemes: [],                  // {id,name,cfg,result}
   compareId: null,
@@ -216,7 +217,8 @@ function attachCurveEvents(svg) {
   svg.addEventListener('mousemove', e => {
     const {x, y} = pt(e);
     if (dragM != null) {
-      const c = Math.max(-yRange, Math.min(yRange, centsAtY(y)));
+      const yr = yRange();
+      const c = Math.max(-yr, Math.min(yr, centsAtY(y)));
       state.locks.set(dragM, Math.round(c * 10) / 10);
       // 拖动中即时重绘锚点, 松开后请求后端
       const a = svg.querySelector(`.anchor[data-m="${dragM}"]`);
@@ -321,25 +323,38 @@ function highlightKeys(ms, on) {
 
 function keyInfo(m) { return state.result?.keys.find(k => k.m === m); }
 
+// 音程 → 参与拍频的分音序号 [低音分音, 高音分音]
+// +5=纯四度(4:3) +7=纯五度(3:2) +12=八度(2:1) +19=十二度(3:1) +24=双八度(4:1)
+const PARTIAL_PAIR = {5: [4, 3], 7: [3, 2], 12: [2, 1], 19: [3, 1], 24: [4, 1]};
+
+// 用户点击: 同一根音再点 → 停止; 否则 (重新) 开始播放
 function onKeyClick(m) {
   if (!state.result) { toast('请先载入数据并计算'); return; }
+  if (state.playing && state.playing.root === m) { stopPlay(); return; }
+  startPlay(m);
+}
+
+// 程序化启动/刷新播放 (不触发"同根即停")
+function startPlay(m) {
+  if (!state.result) return;
   const k = keyInfo(m);
   const up = parseInt($('#interval').value);
   const useP = $('#use-partials').checked;
-
-  // 点已在播放的根 → 停
-  if (state.playing && state.playing.root === m) { stopPlay(); return; }
   stopPlay();
 
   const hi = keyInfo(m + up);
-  if (!hi) { PianoAudio.playOne(k.f_target, k.B, useP); return; }
+  const token = ++state.playToken;
+  if (!hi) {
+    PianoAudio.playOne(k.f_target, k.B, useP);
+    state.playing = {root: m, up, raf: 0, token};
+    return;
+  }
 
-  const bMap = {5: [3, 2], 7: [3, 2], 12: [2, 1], 19: [3, 1], 24: [4, 1]};
-  const [b, p] = bMap[up];
+  const [b, p] = PARTIAL_PAIR[up];
   const pb = PianoAudio.playPair(k.f_target, k.B, hi.f_target, hi.B, b, p, useP);
 
   $('#beat-readout').innerHTML =
-    `${k.name}→${hi.name}: 匹配分音 ${pb.beatPartialHz.toFixed(1)} Hz, ` +
+    `${k.name}→${hi.name} (${b}:${p}): 匹配分音 ${pb.beatPartialHz.toFixed(1)} Hz, ` +
     `<b>${Math.abs(pb.beatHz).toFixed(2)} Hz</b> 拍频 ` +
     (Math.abs(pb.beatHz) < 0.15 ? '(零拍 ✓)' : pb.beatHz > 0 ? '低音偏高 ↓' : '低音偏低 ↑');
 
@@ -347,28 +362,33 @@ function onKeyClick(m) {
   const needle = $('#beat-needle');
   const t0 = performance.now();
   const animate = now => {
-    if (!state.playing) return;
-    const ph = ((now - t0) / 1000 * pb.beatHz) % 1;
+    if (!state.playing || state.playing.token !== token) return;
+    const ph = (((now - t0) / 1000) * pb.beatHz) % 1;
     needle.style.left = `${50 + Math.sin(ph * 2 * Math.PI) * 46}%`;
     state.playing.raf = requestAnimationFrame(animate);
   };
-  state.playing = {root: m, raf: requestAnimationFrame(animate)};
-  setTimeout(() => { if (state.playing && state.playing.root === m) stopPlay(); },
-    pb.endAt - performance.now() + 200);
+  state.playing = {root: m, up, raf: requestAnimationFrame(animate), token};
+  setTimeout(() => {
+    if (state.playing && state.playing.token === token) stopPlay();
+  }, pb.durationMs + 200);
 }
 
 function stopPlay() {
   if (!state.playing) return;
-  cancelAnimationFrame(state.playing.raf);
   const old = state.playing;
   state.playing = null;
-  highlightKeys([old.root, old.root + parseInt($('#interval').value)], false);
+  cancelAnimationFrame(old.raf);
+  highlightKeys([old.root, old.root + (old.up ?? 0)], false);
   PianoAudio.stop();
   $('#beat-needle').style.left = '50%';
 }
 
-$('#use-partials').addEventListener('change', () => { if (state.playing) onKeyClick(state.playing.root); });
-$('#interval').addEventListener('change', () => stopPlay());
+$('#use-partials').addEventListener('change', () => {
+  if (state.playing) startPlay(state.playing.root);   // 用新参数重启并刷新读数
+});
+$('#interval').addEventListener('change', () => {
+  if (state.playing) startPlay(state.playing.root);
+});
 
 // --------------------------------------------------------------- 分析
 
@@ -387,7 +407,7 @@ function renderAll() {
   renderInputTable();
   renderConflicts();
   $('#lock-count').textContent = state.locks.size;
-  if (state.playing) onKeyClick(state.playing.root);  // 参数变了刷新拍频
+  if (state.playing) startPlay(state.playing.root);  // 参数变了: 用新目标频率重启并刷新拍频
 }
 
 $('#btn-clear-locks').addEventListener('click', () => {
@@ -457,9 +477,10 @@ function renderCandidates(cands) {
   const tb = $('#cand-table tbody');
   tb.innerHTML = '';
   const key = $('#cand-sort').value;
+  // 三项指标均为"误差量", 越小越好 → 升序; composite 为收益分, 降序
   cands.sort((a, b) => key === 'composite'
     ? composite(b.score) - composite(a.score)
-    : b.score[key] - a.score[key]);
+    : a.score[key] - b.score[key]);
   for (const c of cands) {
     const tr = document.createElement('tr');
     tr.innerHTML = `<td style="text-align:left">${c.name}</td>

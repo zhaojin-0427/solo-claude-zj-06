@@ -250,6 +250,7 @@ def api_scheme_delete(scid):
     return jsonify({'ok': True})
 
 
+init_db()
+
 if __name__ == '__main__':
-    init_db()
     app.run(host='0.0.0.0', port=5000, debug=True)

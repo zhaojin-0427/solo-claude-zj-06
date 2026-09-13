@@ -59,7 +59,7 @@
         stop: () => this.stop(),
         beatHz: fa - fb,
         beatPartialHz: (fa + fb) / 2,
-        endAt: (t + dur) * 1000,
+        durationMs: dur * 1000,
       };
     },
     playOne(f1, B, usePartials = true) {
