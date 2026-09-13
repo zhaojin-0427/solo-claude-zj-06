@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>钢琴拉伸律工作台</title>
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<header>
+  <h1>🎹 钢琴拉伸律工作台</h1>
+  <div class="hdr-actions">
+    <button id="btn-demo" class="ghost">载入示范琴</button>
+    <button id="btn-save-session">保存会话</button>
+    <select id="sel-sessions" title="已保存会话"><option value="">打开会话…</option></select>
+  </div>
+</header>
+
+<main>
+<section class="panel input-panel">
+  <div class="panel-h">
+    <h2>① 实测输入</h2>
+    <div class="row">
+      <label>琴名 <input id="piano-name" type="text" placeholder="如: 工作室 Steinway B"></label>
+      <label>A4 基准 <input id="a4" type="number" value="440.0" step="0.1" min="420" max="460"></label>
+      <span class="hint">2~8 次分音权重</span>
+      <div id="pweights" class="pweights"></div>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table id="input-table">
+      <thead><tr><th>键</th><th>MIDI</th><th>f₁ 基频</th>
+        <th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th>
+        <th>B 拟合</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div class="row small">
+    <button id="btn-add-key" class="ghost">+ 添加琴键</button>
+    <span class="hint">仅需输入有测量值的键; 基频或分音留空即可。</span>
+  </div>
+</section>
+
+<section class="panel cfg-panel">
+  <h2>② 匹配规则与延伸方案</h2>
+  <div class="cfg-grid">
+    <div class="cfg-block">
+      <h3>八度匹配</h3>
+      <label><input type="radio" name="rule" value="octave" checked> 仅八度</label>
+      <label><input type="radio" name="rule" value="twelfth"> 八度 + 十二度</label>
+      <label><input type="radio" name="rule" value="double"> + 双八度</label>
+      <label><input type="radio" name="rule" value="balanced"> 三规则平衡</label>
+      <label>八度分音 <select id="oct-partial">
+        <option value="1">2:1 (基础)</option>
+        <option value="2">4:2 (大拉伸)</option>
+        <option value="3">6:3 (最大拉伸)</option>
+      </select></label>
+    </div>
+    <div class="cfg-block">
+      <h3>低/高音延伸</h3>
+      <label><input type="radio" name="extension" value="flat"> 平直 (边缘持平)</label>
+      <label><input type="radio" name="extension" value="moderate" checked> 适度 (半斜率外推)</label>
+      <label><input type="radio" name="extension" value="full"> 完全 (全斜率外推)</label>
+      <label>拉伸强度 <input id="strength" type="range" min="0.8" max="1.2" step="0.01" value="1.0">
+        <span id="strength-v">1.00</span></label>
+      <label>平滑正则 <input id="smooth" type="range" min="0" max="1" step="0.01" value="0.5">
+        <span id="smooth-v">0.50</span></label>
+    </div>
+    <div class="cfg-block">
+      <h3>容差</h3>
+      <label>实测偏离 <input id="tol-dev" type="number" value="25" min="1" max="200" step="1"> 音分</label>
+      <label>拍频残差 <input id="tol-beat" type="number" value="2" min="0.2" max="20" step="0.2"> 音分</label>
+      <label>曲线突跳 <input id="tol-kink" type="number" value="6" min="1" max="40" step="0.5"> 音分</label>
+      <button id="btn-analyze">计算拉伸律</button>
+    </div>
+  </div>
+</section>
+
+<section class="panel curve-panel">
+  <div class="panel-h">
+    <h2>③ 调律曲线</h2>
+    <div class="legend">
+      <span><i class="lg curve"></i>目标音分偏移</span>
+      <span><i class="lg meas"></i>实测</span>
+      <span><i class="lg fit"></i>实测拟合键</span>
+      <span><i class="lg lock"></i>锁定锚点 (可拖动)</span>
+      <span><i class="lg comp"></i>对比方案</span>
+      <button id="btn-clear-locks" class="ghost" style="padding:2px 10px">全部解锁 (<span id="lock-count">0</span>)</button>
+    </div>
+  </div>
+  <svg id="curve" viewBox="0 0 1100 320" preserveAspectRatio="none"></svg>
+  <div id="curve-tip" class="tip"></div>
+</section>
+
+<section class="panel kb-panel">
+  <div class="panel-h">
+    <h2>④ 键盘 · 音程试听 · 拍频</h2>
+    <div class="beat-box">
+      <label>音程
+        <select id="interval">
+          <option value="12">八度 2:1</option>
+          <option value="19">十二度 3:1</option>
+          <option value="24">双八度 4:1</option>
+          <option value="7">纯五度 3:2</option>
+          <option value="5">纯四度 4:3</option>
+        </select></label>
+      <label><input id="use-partials" type="checkbox" checked> 带分音合成</label>
+      <span id="beat-readout" class="beat-readout">—</span>
+    </div>
+  </div>
+  <svg id="keyboard" viewBox="0 0 1100 150" preserveAspectRatio="none"></svg>
+  <div id="beat-meter"><div id="beat-needle"></div></div>
+</section>
+
+<section class="panel conflict-panel">
+  <h2>⑤ 冲突定位</h2>
+  <ul id="conflict-list"><li class="muted">计算后在此列出。</li></ul>
+</section>
+
+<section class="panel cand-panel">
+  <div class="panel-h">
+    <h2>⑥ 候选方案排序</h2>
+    <label>排序依据
+      <select id="cand-sort">
+        <option value="composite">综合评分</option>
+        <option value="max_beat">最大拍频误差</option>
+        <option value="smooth">曲线平滑度</option>
+        <option value="lock_change">锁定键改动量</option>
+      </select></label>
+    <button id="btn-candidates" class="ghost">比较 6 组权重/延伸组合</button>
+  </div>
+  <table id="cand-table"><thead><tr>
+    <th>方案</th><th>最大拍频(Hz)</th><th>平滑度</th><th>锁改动(¢)</th>
+    <th>冲突数</th><th></th></tr></thead><tbody></tbody></table>
+</section>
+
+<section class="panel version-panel">
+  <div class="panel-h">
+    <h2>⑦ 版本与检查卡</h2>
+    <div>
+      <input id="scheme-name" type="text" placeholder="版本名 (如 v1-平衡)" class="inline">
+      <button id="btn-commit">保留当前为版本</button>
+      <button id="btn-checkcard">生成调律检查卡</button>
+    </div>
+  </div>
+  <ul id="scheme-list" class="scheme-list"><li class="muted">尚无版本。</li></ul>
+  <div id="checkcard" class="checkcard hidden"></div>
+</section>
+</main>
+
+<div id="toast"></div>
+<script src="/static/js/audio.js"></script>
+<script src="/static/js/app.js"></script>
+</body>
+</html>
