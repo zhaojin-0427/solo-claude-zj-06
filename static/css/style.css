@@ -172,3 +172,95 @@ td.acts .del { background: none; color: var(--bad); padding: 0 4px; font-size: 1
 #keyboard .bn.capsel { fill: #2f5d78; }
 @media (max-width: 860px) { .cap-grid { grid-template-columns: 1fr; }
   .cap-meters { grid-template-columns: 1fr 1fr; } }
+
+/* ---------------------------------------------------------- 逐键调律作业 */
+.job-top { display: flex; gap: 8px; align-items: center; }
+.job-top select { width: 260px; }
+.job-phase { padding: 2px 10px; border-radius: 10px; font-size: 12px; font-weight: 600;
+  background: var(--panel2); color: var(--muted); border: 1px solid var(--line); }
+.job-phase.ph-coarse, .job-phase.ph-fine { color: var(--accent); border-color: var(--accent); }
+.job-phase.ph-review { color: var(--accent2); border-color: var(--accent2); }
+.job-phase.ph-frozen { color: #a8d8ff; border-color: #7fb4e0; background: rgba(127,180,224,.12); }
+.job-bar { margin: 10px 0; display: flex; flex-direction: column; gap: 6px; }
+.job-prog { height: 10px; background: #0c0f13; border-radius: 5px; overflow: hidden; }
+#job-prog-fill { height: 100%; width: 0;
+  background: linear-gradient(90deg, var(--good), #4ea05c); transition: width .3s; }
+.job-stats { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; font-size: 12.5px;
+  color: var(--muted); font-variant-numeric: tabular-nums; }
+.job-stats button { margin-left: auto; }
+.job-grid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 14px; margin-top: 6px; }
+.job-main { min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.job-side { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px 10px; min-width: 0; max-height: 560px; overflow-y: auto; }
+.job-side h3 { margin: 6px 0; font-size: 13px; color: var(--muted); }
+#job-keyboard { width: 100%; height: 130px; background: #0c0f13; border-radius: 6px; }
+#job-keyboard .jwn { stroke: #777; stroke-width: .4; cursor: pointer; }
+#job-keyboard .jbn { stroke: #000; cursor: pointer; }
+#job-keyboard text.jlb { font-size: 8px; fill: #555; text-anchor: middle; pointer-events: none; }
+#job-keyboard .st-done { fill: #b9d9be; }
+#job-keyboard .st-outside { fill: #d8d6cf; }
+#job-keyboard .st-outside-bad { fill: #e8d3cf; }
+#job-keyboard .st-open { fill: #f0cf86; }
+#job-keyboard .st-locked { fill: #e4c9f0; }
+#job-keyboard .st-pending { fill: #e8e6df; }
+#job-keyboard rect.reopen { stroke: var(--bad); stroke-width: 2.2; }
+#job-keyboard rect.cur { stroke: #fff; stroke-width: 2.5; }
+#job-keyboard .jbn.st-done { fill: #3c5a42; }
+#job-keyboard .jbn.st-open { fill: #8a6a26; }
+#job-keyboard .jbn.st-locked { fill: #5c3c70; }
+#job-keyboard .jbn.st-outside, #job-keyboard .jbn.st-outside-bad,
+#job-keyboard .jbn.st-pending { fill: #222; }
+#job-keyboard .jbn.reopen { stroke: #ff8a72; }
+.job-legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 11.5px; color: var(--muted); }
+.job-legend i.jk { width: 12px; height: 12px; border-radius: 2px; display: inline-block;
+  margin-right: 3px; vertical-align: -2px; border: 1px solid #555; }
+.job-legend .done { background: #b9d9be; } .job-legend .open { background: #f0cf86; }
+.job-legend .reopen { background: #f0cf86; border-color: var(--bad); border-width: 2px; }
+.job-legend .locked { background: #e4c9f0; } .job-legend .outside { background: #d8d6cf; }
+.job-legend .bad { background: var(--bad); }
+.job-keycard { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.jk-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.jk-head b { font-size: 16px; color: var(--accent); }
+.jk-actions { display: flex; gap: 6px; }
+.jk-actions button.on { color: var(--lock); border-color: var(--lock); }
+.jk-input { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.jk-input input[type=number] { width: 120px; }
+.jk-input input[type=text] { width: 220px; }
+.jk-live { font-variant-numeric: tabular-nums; font-weight: 600; }
+.jk-live.ok { color: var(--good); } .jk-live.bad { color: var(--bad); }
+.jk-beats table { font-size: 11.5px; }
+.jk-beats th, .jk-beats td { padding: 1px 8px; text-align: right; border: none; }
+.jk-beats th:first-child, .jk-beats td:first-child { text-align: left; }
+.jk-beats tr.over td { color: #e8a495; }
+.jk-send { display: flex; gap: 12px; align-items: center; }
+.job-queue, .job-reopens { list-style: none; margin: 0 0 8px; padding: 0; display: flex;
+  flex-direction: column; gap: 4px; }
+.job-queue li { display: flex; gap: 8px; align-items: center; background: #1b222c;
+  border: 1px solid var(--line); border-radius: 5px; padding: 3px 8px; font-size: 12px;
+  cursor: pointer; }
+.job-queue li.cur { border-color: var(--accent); }
+.job-queue .qo { color: var(--muted); width: 22px; text-align: right; font-size: 11px; }
+.job-queue i { margin-left: auto; font-style: normal; font-variant-numeric: tabular-nums; }
+.job-queue i.bad, .jk-beats .bad, td.bad, .badrow td .bad, .jc-tablewrap .bad { color: var(--bad); font-weight: 600; }
+.job-queue li.muted { background: none; border: none; cursor: default; }
+.job-reopens li { background: rgba(224,99,78,.08); border-left: 3px solid var(--bad);
+  border-radius: 4px; padding: 4px 8px; font-size: 11.5px; cursor: pointer; }
+.job-reopens i { color: var(--muted); font-style: normal; margin-left: 6px; }
+.job-reopens div { color: #e8a495; margin-top: 1px; }
+.job-compare { margin-top: 12px; }
+.jc-tablewrap { max-height: 380px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; }
+#jc-table td, #jc-table th { text-align: right; padding: 2px 7px; }
+#jc-table td:first-child, #jc-table th:first-child { text-align: left; position: sticky; left: 0;
+  background: var(--panel2); }
+#jc-table tbody tr { cursor: pointer; }
+#jc-table tbody tr.badrow { background: rgba(224,99,78,.07); }
+#jc-table td.bad { color: var(--bad); font-weight: 600; }
+#jc-table td.muted { color: var(--muted); }
+.job-frozen { display: flex; gap: 12px; align-items: center; margin-top: 12px;
+  background: rgba(127,180,224,.1); border: 1px solid #7fb4e0; border-radius: 8px; padding: 10px 14px;
+  flex-wrap: wrap; }
+.job-frozen b { color: #a8d8ff; }
+.job-frozen button { margin-left: auto; }
+@media (max-width: 860px) { .job-grid { grid-template-columns: 1fr; } }
+.job-reopens li.muted { background: none; border-left: none; color: var(--muted); cursor: default; }

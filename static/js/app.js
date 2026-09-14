@@ -25,7 +25,7 @@ const state = {
 
 // 采集模块需要访问的接口
 window.PianoApp = {
-  state, cfg, buildInput,
+  state, cfg, buildInput, toast,
   renderInputTable: () => renderInputTable(),
   renderCapSel: () => renderKeyboardCapSel(),
   scheduleAnalyze: (...a) => scheduleAnalyze(...a),
@@ -575,11 +575,13 @@ $('#btn-save-session').addEventListener('click', async () => {
   for (const id of (old.schemes || []).map(s => s.id))
     await fetch(`/api/schemes/${id}`, {method: 'DELETE'});
   for (const s of state.schemes) {
-    await post('/api/schemes', {session_id: sid, name: s.name, cfg: s.cfg,
+    const r = await post('/api/schemes', {session_id: sid, name: s.name, cfg: s.cfg,
       result: s.result, locked_count: state.locks.size});
+    s.server_id = r.id;            // 回填服务端 id, 供逐键调律作业从该版本建立
   }
   toast(`会话已保存 (#${sid})`);
   loadSessionList();
+  window.PianoJobs?.loadJobs?.();
 });
 
 $('#sel-sessions').addEventListener('change', async e => {
@@ -602,7 +604,7 @@ function hydrate(s) {
   state.locks = new Map((inp.locks || []).map(l => [l.m, l.cents]));
   state.pweights = Object.fromEntries(Object.entries(inp.pweights || {}).map(([n, v]) => [+n, +v]));
   state.schemes = (s.schemes || []).map(x => ({
-    id: x.id, name: x.name, cfg: x.cfg, result: x.result}));
+    id: x.id, server_id: x.id, name: x.name, cfg: x.cfg, result: x.result}));
   renderWeights();
   renderInputTable();
   renderSchemeList();

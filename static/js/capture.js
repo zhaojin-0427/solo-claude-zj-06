@@ -1053,6 +1053,17 @@
 
   window.PianoCapture = {
     selectKey,
+    // 作业面板"带入已有采集结果": 该键选中分音中位数 f1, 无则 null
+    takeMedian(m) {
+      const agg = aggregate(m);
+      return agg.meds[1] ?? null;
+    },
+    // 供作业面板在键盘上直接跳到采集面板
+    goCapture(m) {
+      selectKey(m);
+      document.querySelector('.cap-panel')
+        ?.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+    },
     reset() {                       // 会话切换/载入示范时清空
       for (const k of window.PianoApp.state.keys.values())
         for (const t of k.captures || []) delete t._buf;

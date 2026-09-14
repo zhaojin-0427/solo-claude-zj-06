@@ -188,11 +188,96 @@
   <ul id="scheme-list" class="scheme-list"><li class="muted">尚无版本。</li></ul>
   <div id="checkcard" class="checkcard hidden"></div>
 </section>
+
+<section class="panel job-panel">
+  <div class="panel-h">
+    <h2>⑨ 逐键调律作业</h2>
+    <div class="job-top">
+      <select id="job-select"><option value="">选择作业…</option></select>
+      <button id="btn-job-new" class="ghost">从已保存版本建立…</button>
+      <span id="job-phase" class="job-phase"></span>
+    </div>
+  </div>
+
+  <div id="job-empty" class="hint">作业从 ⑧ 中已保存到会话的拉伸律版本建立 (需先保存会话)。建立后依次经过
+    待开始 → 粗调 → 精调 → 复核 → 冻结, 每轮记录 88 键实测频率、音分偏差、时间与回调原因。</div>
+
+  <div id="job-body" class="hidden">
+    <div class="job-bar">
+      <div class="job-prog"><div id="job-prog-fill"></div></div>
+      <div class="job-stats">
+        <span id="job-prog-text"></span>
+        <span id="job-round-text"></span>
+        <span id="job-lock-text"></span>
+        <button id="btn-job-compare" class="ghost">各轮并排比较</button>
+        <button id="btn-job-advance"></button>
+      </div>
+    </div>
+
+    <div class="job-grid">
+      <div class="job-main">
+        <svg id="job-keyboard" viewBox="0 0 1100 130" preserveAspectRatio="none"></svg>
+        <div class="job-legend">
+          <span><i class="jk done"></i>已达标</span>
+          <span><i class="jk open"></i>本轮待调</span>
+          <span><i class="jk reopen"></i>回查重开</span>
+          <span><i class="jk locked"></i>已锁定</span>
+          <span><i class="jk outside"></i>轮次外</span>
+          <span><i class="jk bad"></i>偏离/拍频越限</span>
+        </div>
+
+        <div id="job-keycard" class="job-keycard">
+          <div class="jk-head">
+            <div><b id="jk-name">—</b> <span id="jk-order" class="hint"></span></div>
+            <div id="jk-target" class="hint"></div>
+            <div class="jk-actions">
+              <button id="btn-jk-lock" class="ghost" title="稳定键锁定后不会被回查重开, 也不进入后续精调">🔒 锁定</button>
+              <button id="btn-jk-capture" class="ghost" title="到 ② 采集面板录该键">🎤 去采集</button>
+            </div>
+          </div>
+          <div class="jk-input">
+            <label>实测 f₁ (Hz)
+              <input id="jk-f" type="number" step="any" placeholder="手工录入"></label>
+            <button id="btn-jk-take">带入采集中位数</button>
+            <label class="jk-live" id="jk-live">偏差 —</label>
+            <label class="jk-reason">回调原因
+              <input id="jk-reason" type="text" placeholder="如: 弦轴滑动 / 八度回查"></label>
+          </div>
+          <div id="jk-beats" class="jk-beats"></div>
+          <div class="jk-send">
+            <button id="btn-jk-send">记录本键测量</button>
+            <span id="jk-ts" class="hint"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="job-side">
+        <h3>顺序队列 <span id="job-queue-n" class="hint"></span></h3>
+        <ul id="job-queue" class="job-queue"></ul>
+        <h3>待回查项 <span id="job-reopen-n" class="hint"></span></h3>
+        <ul id="job-reopens" class="job-reopens"></ul>
+      </div>
+    </div>
+
+    <div id="job-compare" class="job-compare hidden">
+      <div class="panel-h"><h3>各轮漂移 · 返工次数 · 最大拍频误差</h3>
+        <label class="hint"><input id="jc-filter" type="checkbox" checked> 只看未达标/返工</label></div>
+      <div class="jc-tablewrap"><table id="jc-table"><thead></thead><tbody></tbody></table></div>
+    </div>
+
+    <div id="job-frozen" class="job-frozen hidden">
+      <b>❄ 已冻结</b>
+      <span class="hint">来源方案、全部轮次、最终测值与状态均已冻结; 复制作业后才能继续调整。</span>
+      <button id="btn-job-copy">复制作业 (同来源, 重新调律)</button>
+    </div>
+  </div>
+</section>
 </main>
 
 <div id="toast"></div>
 <script src="/static/js/audio.js"></script>
 <script src="/static/js/capture.js"></script>
 <script src="/static/js/app.js"></script>
+<script src="/static/js/jobs.js"></script>
 </body>
 </html>
