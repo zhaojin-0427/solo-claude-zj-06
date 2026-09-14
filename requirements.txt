@@ -1,0 +1,17 @@
+# 钢琴拉伸律工作台运行依赖
+# 安装: python3 -m pip install -r requirements.txt
+#
+# 顶层依赖:
+#   Flask — Web 框架 (路由/模板)
+#   numpy — 调律曲线求解 (solve_stretch 中的矩阵构建与线性求解)
+# 缺失 numpy 时 /api/demo 与 /api/analyze 走同一求解路径会失败, 请先按本清单安装。
+Flask==3.1.3
+numpy==2.4.6
+
+# Flask 传递依赖 (锁定为当前已验证版本, 保证全新环境可复现)
+blinker==1.9.0
+click==8.5.0
+itsdangerous==2.2.0
+Jinja2==3.1.6
+MarkupSafe==3.0.3
+Werkzeug==3.1.8

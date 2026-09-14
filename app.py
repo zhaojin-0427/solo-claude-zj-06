@@ -13,6 +13,14 @@ from acoustics import interpolate_B, solve_stretch, constraint_beats
 from acoustics import CANDIDATE_PRESETS, score_solution, detect_conflicts, tuning_order
 from demo import build_demo
 
+try:
+    import numpy  # noqa: F401  (solve_stretch 内使用; 提前失败以便提示安装)
+except ImportError as e:  # pragma: no cover
+    raise SystemExit(
+        '缺少运行依赖 numpy (调律曲线求解需要)。\n'
+        '请先安装: python3 -m pip install -r requirements.txt'
+    ) from e
+
 BASE = os.path.dirname(os.path.abspath(__file__))
 DB = os.path.join(BASE, 'tuning.db')
 
@@ -870,7 +878,7 @@ def api_job_advance(jid):
         con.execute("INSERT INTO job_events(job_id,round_id,m,kind,data,ts) "
                     "VALUES(?,?,?,?,?,?)",
                     (jid, cur['id'], None, 'freeze',
-                     json.dumps({'final': final, 'rounds': len(rounds) + 1},
+                     json.dumps({'final': final, 'rounds': len(rounds)},
                                 ensure_ascii=False), now))
         con.execute("UPDATE jobs SET phase='frozen', updated=? WHERE id=?", (now, jid))
         con.commit()
