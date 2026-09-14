@@ -17,7 +17,7 @@
     m: A4,
     stream: null, ctx: null, source: null, proc: null, mute: null,
     sr: 48000,
-    mode: 'idle',                // idle | noise | armed | rec
+    mode: 'idle',                // idle | noise | ready(待机) | waiting(已点录音, 等待击弦) | rec
     raf: 0, lastDraw: 0, lastMeter: 0,
     ring: [],                    // 最近的 Float32 块 (约 0.6s)
     ringS: 0,
@@ -202,17 +202,24 @@
       const snr = hit.pk.db - noiseDbAt(noisePow, hit.pk.f, dF);
       snrVals.push(snr);
       partials[n] = {f: hit.pk.f, cents: dc, prom: hit.d,
-                     db: hit.pk.db, snr, k: hit.pk.k};
+                     db: hit.pk.db, lin: hit.pk.lin, snr, k: hit.pk.k};
     }
-    // 次序错误: 已用峰旁出现更强的未用峰, 或同一峰被多个分音占用
+    // 次序错误: 以预测峰位为中心 ±ORDER_TOL 邻域内, 出现比已选峰更强
+    // (可能才是该分音) 或离预测更近且不弱的未用峰; 同一峰被多个分音占用也算。
+    // 同音弦组的轻微失谐双峰: 峰距 <5¢ 且强度相近时不判错。
+    const ORDER_TOL = 30;      // 邻峰判定窗 (音分)
     for (let n = 1; n <= 8; n++) {
       if (!partials[n]) continue;
-      const pred = predF(best.f1, best.B, n);
-      const tol = Math.max(partials[n].prom, 12);
-      const rivals = peaks.filter(p => !usedPeaks.has(p.k) &&
-        Math.abs(cents(pred, p.f)) < tol);
-      if (rivals.some(p => p.lin > partials[n].f && p.db > partials[n].db))
-        best.orderError = true;
+      const got = partials[n];
+      for (const p of peaks) {
+        if (usedPeaks.has(p.k)) continue;
+        const dRival = Math.abs(cents(predF(best.f1, best.B, n), p.f));
+        if (dRival > ORDER_TOL) continue;
+        if (p.lin > got.lin * 1.05) { best.orderError = true; break; }
+        if (p.lin > got.lin * 0.95 && dRival + 5 < Math.abs(got.cents)) {
+          best.orderError = true; break;
+        }
+      }
     }
     const ns = Object.keys(partials).length;
     best.partials = partials;
@@ -305,6 +312,7 @@
     $('#btn-discard').classList.add('hidden');
     $('#cap-phase').textContent = '';
     cap.pending = null;
+    cap.armT = Infinity;
     setMeters(null); renderGates([]);
   }
 
@@ -327,10 +335,11 @@
       if (shots < 5) { cap.calibTimer = setTimeout(sample, 240); return; }
       for (let k = 0; k < accPow.length; k++) cap.noisePow[k] = accPow[k] / shots;
       cap.noiseRms = Math.sqrt(rmsAcc / Math.max(1, rmsN));
-      cap.mode = 'armed';
+      cap.mode = 'ready';
       $('#mic-status').textContent =
-        `就绪 — 环境噪声 ${db(cap.noiseRms).toFixed(0)} dBFS, 点录音后击弦`;
+        `就绪 — 环境噪声 ${db(cap.noiseRms).toFixed(0)} dBFS, 每次测量请先点下方按钮`;
       $('#btn-rec').disabled = false;
+      $('#btn-rec').textContent = '① 点选琴键后录单次击弦';
     };
     sample();
   }
@@ -343,11 +352,11 @@
     const rms = rmsOf(copy), peak = peakOf(copy);
     cap._live = {rms, peak, clip: countClip(ch)};
 
-    if (cap.mode === 'noise') return;
-    if (cap.mode === 'armed') {
-      // 等待击弦: 电平显著高出噪声即触发 (冷却 1s 防止尾音重复触发)
+    if (cap.mode === 'noise' || cap.mode === 'ready') return;
+    if (cap.mode === 'waiting') {
+      // 仅在用户点过"录单次击弦"后, 才允许电平触发
       if (performance.now() > cap.armT &&
-          rms > cap.noiseRms * 10 ** (GATE.level / 20) * 1.4 && peak > 0.01)
+          rms > cap.noiseRms * 10 ** (GATE.snr / 20) * 1.4 && peak > 0.01)
         startRec();
       else { updateMeters({rms, peak, clip: 0, stable: 0}); return; }
     }
@@ -368,6 +377,7 @@
 
   function startRec() {
     cap.mode = 'rec';
+    cap.armT = Infinity;
     cap.recChunks = [];
     cap.recPre = concatRecent(cap.sr * 0.12);   // 预留 120ms 包住击弦瞬间
     cap.trigT = performance.now();
@@ -404,9 +414,9 @@
 
   function finishRec(manual) {
     if (cap.mode !== 'rec') return;
-    cap.mode = 'armed';
-    cap.armT = performance.now() + 1000;
-    $('#btn-rec').textContent = '重录 (覆盖本次)';
+    cap.mode = 'ready';       // 回到待机: 不会自动开始下一次, 须再点按钮
+    cap.armT = Infinity;
+    $('#btn-rec').textContent = '录下一次击弦';
     const chunks = cap.recPre ? [cap.recPre, ...cap.recChunks] : cap.recChunks;
     const full = concat(chunks);
     analyzeTake(full, manual);
@@ -679,7 +689,8 @@
     if (!ts.length) {
       list.innerHTML = '<li class="muted">启用麦克风后点「录单次击弦」。不合格的录音不会写入, 可重录。</li>';
       $('#cap-aggregate').innerHTML = '尚无合格测量';
-      $('#cap-agg-effect').textContent = '';
+      const eff = $('#cap-agg-effect');
+      if (eff) eff.textContent = '';
       return;
     }
     list.innerHTML = '';
@@ -731,7 +742,8 @@
     const m = cap.m, agg = aggregate(m);
     if (!Object.keys(agg.meds).length) {
       $('#cap-aggregate').innerHTML = '尚无合格测量';
-      $('#cap-agg-effect').textContent = '';
+      const eff = $('#cap-agg-effect');
+      if (eff) eff.textContent = '';
       return;
     }
     const rows = Object.entries(agg.meds).sort((a, b) => +a[0] - +b[0])
@@ -868,10 +880,12 @@
       cap.lastDraw = ts;
       drawLive();
       // 待机时也刷新输入电平与信噪比
-      if ((cap.mode === 'armed' || cap.mode === 'noise') && cap._live && !cap.pending) {
+      if ((cap.mode === 'ready' || cap.mode === 'waiting' || cap.mode === 'noise')
+          && cap._live && !cap.pending) {
         const {rms, peak} = cap._live;
         const snr = cap.noiseRms > 0 ? db(rms) - db(cap.noiseRms) : 0;
-        setMeters({rms, peak, clip: 0, stable: 0, snr: cap.mode === 'armed' ? snr : null});
+        setMeters({rms, peak, clip: 0, stable: 0,
+                   snr: cap.mode === 'noise' ? null : snr});
       }
     }
   }
@@ -994,8 +1008,11 @@
     cap.pending = null;
     $('#btn-accept').classList.add('hidden');
     $('#btn-discard').classList.add('hidden');
-    $('#btn-rec').textContent = cap.mode === 'armed'
-      ? '录单次击弦' : '① 点选琴键后录单次击弦';
+    $('#btn-rec').textContent = cap.mode === 'waiting'
+      ? '等待击弦… (点此取消)'
+      : cap.mode === 'ready'
+        ? '录单次击弦'
+        : '① 点选琴键后录单次击弦';
     $('#cap-phase').textContent = '';
     renderTakes();
     window.PianoApp?.renderCapSel?.();
@@ -1007,13 +1024,22 @@
     $('#btn-mic').addEventListener('click', enableMic);
     $('#btn-rec').addEventListener('click', () => {
       if (cap.mode === 'rec') { finishRec(true); return; }
-      if (cap.mode !== 'armed') return;
-      // 丢弃上一次未处理的分析, 立即解除冷却, 等待电平触发
+      if (cap.mode === 'waiting') {                 // 取消等待
+        cap.mode = 'ready';
+        cap.armT = Infinity;
+        $('#btn-rec').textContent = '录单次击弦';
+        $('#cap-phase').textContent = '已取消 — 准备阶段声响不会启动录音';
+        return;
+      }
+      if (cap.mode !== 'ready') return;
+      // 明确起点: 清除上次分析, 进入等待击弦
       cap.pending = null;
-      cap.armT = 0;
+      cap.armT = performance.now() + 200;   // 200ms 防按键声立即误触发
+      cap.mode = 'waiting';
       $('#btn-accept').classList.add('hidden');
       $('#btn-discard').classList.add('hidden');
-      $('#cap-phase').textContent = '等待击弦 (电平自动触发)…';
+      $('#btn-rec').textContent = '等待击弦… (点此取消)';
+      $('#cap-phase').textContent = '请击弦 — 仅此刻起的声响会被采集';
     });
     $('#btn-accept').addEventListener('click', acceptPending);
     $('#btn-discard').addEventListener('click', discardPending);
