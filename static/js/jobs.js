@@ -156,10 +156,12 @@
     $('#jk-order').textContent = `调律序 ${k.order} · MIDI ${k.m}`;
     $('#jk-target').textContent =
       `目标 ${fmtF(k.f_target)} Hz (${fmtC(k.target_cents)}) · B ${k.B.toExponential(2)}`;
-    $('#jk-f').value = k.f_meas ?? '';
-    $('#jk-reason').value = k.reason || '';
-    $('#jk-ts').textContent = k.ts
-      ? `上次: 第 ${k.round_idx} 轮 · ${fmtTime(k.ts)}${k.reason ? ' · ' + k.reason : ''}` : '尚无测量';
+    $('#jk-f').value = k.cur_round_idx != null ? k.f_meas ?? '' : '';
+    $('#jk-reason').value = (k.cur_round_idx != null ? k.reason : '') || '';
+    const lastTs = k.cur_round_idx != null
+      ? `本轮 #${k.cur_round_idx} · ${fmtTime(k.ts)}${k.reason ? ' · ' + k.reason : ''}`
+      : (k.ts ? `上轮 #${k.round_idx} · ${fmtTime(k.ts)} (本轮尚未重测)` : '尚无测量');
+    $('#jk-ts').textContent = k.locked ? `已锁定 · ${lastTs}` : lastTs;
     liveCents();
 
     // 音程拍频 (实测拍频基于两端当前测值; 目标残拍为方案固有残留)
@@ -206,9 +208,9 @@
   }
 
   function afterMutation(r, preferM) {
-    // 仍选当前键; 若已达标则跳到队列首
+    // 仍选当前键; 本轮已完成则跳到队列首
     const kk = r.keys.find(x => x.m === preferM);
-    if (kk?.passing || kk?.locked) jstate.current = r.queue[0]?.m ?? preferM;
+    if (kk?.round_done) jstate.current = r.queue[0]?.m ?? preferM;
     else jstate.current = preferM;
     render();
   }
@@ -243,6 +245,19 @@
     const ul = $('#job-queue');
     $('#job-queue-n').textContent = `${d.queue.length} 项`;
     ul.innerHTML = '';
+    if (!d.queue.length) {
+      const li = document.createElement('li');
+      li.className = 'muted';
+      const cr = d.current_round;
+      li.textContent = cr
+        ? (cr.kind === 'review'
+            ? '本轮 88 键均已重测达标, 可复核冻结'
+            : d.cur_total === 0
+              ? '精调轮范围为空 (粗调已全达标), 确认后进入复核'
+              : '本轮应测琴键均已完成, 可推进到下一阶段')
+        : '作业尚未开始';
+      ul.appendChild(li);
+    }
     for (const k of d.queue.slice(0, 60)) {
       const li = document.createElement('li');
       li.className = `q st-${k.status}${jstate.current === k.m ? ' cur' : ''}`;
@@ -250,8 +265,11 @@
       ord.className = 'qo'; ord.textContent = k.order;
       const nm = document.createElement('b'); nm.textContent = k.name;
       li.append(ord, nm);
-      if (k.cents == null) {
-        const i = document.createElement('i'); i.textContent = '未测'; li.append(i);
+      if (k.cur_round_idx == null) {
+        const i = document.createElement('i');
+        i.textContent = k.cents == null ? '未测' : '本轮待测';
+        i.classList.add('todo');
+        li.append(i);
       } else {
         const i = document.createElement('i');
         i.textContent = fmtC(k.cents);
@@ -292,13 +310,16 @@
 
   function renderBar() {
     const d = jstate.data, j = d.job;
-    const pct = d.total ? d.done_count / d.total * 100 : 0;
-    $('#job-prog-fill').style.width = `${pct}%`;
-    $('#job-prog-text').textContent = `${d.done_count}/${d.total} 达标或锁定 (${pct.toFixed(0)}%)`;
+    const cp = d.cur_total ? d.cur_done / d.cur_total : 0;
+    $('#job-prog-fill').style.width = `${cp * 100}%`;
+    $('#job-prog-text').textContent =
+      `本轮 ${d.cur_done}/${d.cur_total} · 总达标 ${d.done_count}/${d.total}`;
     const cr = d.current_round;
     $('#job-round-text').textContent = cr
       ? `阶段: ${PHASE_NAME[j.phase]} · ${ROUND_NAME[cr.kind]} #${cr.idx} · ` +
-        (cr.kind === 'review' ? '全 88 键复核' : `本轮 ${d.keys.filter(k => k.in_scope).length} 键`)
+        (cr.kind === 'review' ? '全 88 键复核' :
+         d.cur_total === 0 ? '范围为空 (粗调全达标, 确认后进复核)' :
+         `本轮 ${d.keys.filter(k => k.in_scope).length} 键`)
       : `阶段: ${PHASE_NAME[j.phase]}`;
     $('#job-lock-text').textContent = `🔒 ${d.locked_count}`;
     $('#job-phase').textContent = PHASE_NAME[j.phase] || j.phase;
@@ -312,7 +333,10 @@
     } else if (j.phase === 'coarse') {
       adv.textContent = '粗调完成 → 建立精调轮'; adv.disabled = false;
     } else if (j.phase === 'fine') {
-      adv.textContent = '本轮完成 → 继续精调 / 进复核'; adv.disabled = false;
+      adv.textContent = d.cur_total === 0
+        ? '精调轮(空)确认 → 进入复核'
+        : '本轮完成 → 继续精调 / 进复核';
+      adv.disabled = false;
     } else if (j.phase === 'review') {
       adv.textContent = '③ 复核通过 → 冻结作业'; adv.disabled = false;
     } else {

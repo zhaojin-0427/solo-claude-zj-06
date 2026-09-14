@@ -459,22 +459,30 @@ def _beat_checks(targets, fmap, tol_b=DEFAULT_TOL_BEAT_CENTS,
     return checks, pair
 
 
-def _reopen_events(con, jid, targets, tol_c, tol_b, latest):
-    """未解决的重开事件: 受影响键当前仍未达标 (按最新测值判定)。"""
-    evs = []
+def _failing_now(targets, latest, locks, tol_c, tol_b, tol_hz, scope=None):
+    """当前最新测值下仍未达标的键: 自身偏离或处于任一越限音程端点。"""
     fmap = {m: r['f_meas'] for m, r in latest.items()}
-    checks, _ = _beat_checks(targets, fmap, tol_b)
-    passing = set()
-    for m, r in latest.items():
-        rows = checks.get(m, [])
-        if abs(r['cents']) <= tol_c and all(
-                not c['over'] for c in rows if m + c['up'] in fmap):
-            passing.add(m)
+    _, pair = _beat_checks(targets, fmap, tol_b, tol_hz)
+    bad = {m for m, r in latest.items() if abs(r['cents']) > tol_c}
+    for pr in pair:
+        if pr['over']:
+            bad.add(pr['lo'])
+            bad.add(pr['hi'])
+    if scope is not None:
+        bad = {m for m in bad if m in scope}
+    return {m for m in bad if m not in locks}
+
+
+def _reopen_events(con, jid, targets, tol_c, tol_b, tol_hz, latest, locks=None):
+    """未解决的重开事件: 受影响键当前仍未达标 (按最新测值判定)。"""
+    locks = locks if locks is not None else _locks(con, jid)
+    bad = _failing_now(targets, latest, locks, tol_c, tol_b, tol_hz)
+    evs = []
     for r in con.execute(
             "SELECT * FROM job_events WHERE job_id=? AND kind='reopen' ORDER BY id",
             (jid,)).fetchall():
         d = dict(r)
-        if d['m'] in passing:
+        if d['m'] not in bad:
             continue
         d['data'] = json.loads(d['data'] or '{}')
         evs.append(d)
@@ -495,8 +503,21 @@ def _job_detail(con, jid):
     rounds = _rounds(con, jid)
     cur = rounds[-1] if rounds else None
     cur_scope = cur['scope'] if cur else set()
+    # 本轮每键最新测值 (推进完成判定只认当前轮记录)
+    cur_meas = {}
+    if cur:
+        for r in con.execute(
+                'SELECT * FROM job_meas WHERE job_id=? AND round_id=? ORDER BY id',
+                (jid, cur['id'])).fetchall():
+            cur_meas[r['m']] = dict(r)
     fmap = {m: r['f_meas'] for m, r in latest.items()}
     checks, pair = _beat_checks(targets, fmap, tol_b, tol_hz)
+    # 以任一越限音程端点计为"拍频未达标"
+    beat_bad = set()
+    for pr in pair:
+        if pr['over']:
+            beat_bad.add(pr['lo'])
+            beat_bad.add(pr['hi'])
 
     # 每键状态
     keys = []
@@ -507,9 +528,13 @@ def _job_detail(con, jid):
         if not t:
             continue
         lm = latest.get(m)
+        cm = cur_meas.get(m)
         chk = checks.get(m, [])
         bad_beats = [c for c in chk if c['over']]
-        passing = bool(lm) and abs(lm['cents']) <= tol_c and not bad_beats
+        passing = bool(lm) and abs(lm['cents']) <= tol_c and m not in beat_bad
+        # 本轮是否已测并达标 (锁定键本轮免测, 视为已完成)
+        round_done = (bool(cm) and abs(cm['cents']) <= tol_c
+                      and m not in beat_bad) or m in locks
         in_scope = m in cur_scope
         locked = m in locks
         if cur is None:
@@ -518,7 +543,7 @@ def _job_detail(con, jid):
             status = 'locked'
         elif not in_scope:
             status = 'outside' if passing else 'outside-bad'
-        elif passing:
+        elif round_done:
             status = 'done'
         else:
             status = 'open'
@@ -531,26 +556,29 @@ def _job_detail(con, jid):
                      'f_meas': lm['f_meas'] if lm else None,
                      'cents': lm['cents'] if lm else None,
                      'round_idx': round_idx,
-                     'ts': lm['ts'] if lm else None,
-                     'reason': lm['reason'] if lm else None,
+                     'cur_round_idx': cur['idx'] if (cur and cm) else None,
+                     'ts': (cm or lm)['ts'] if (cm or lm) else None,
+                     'reason': (cm or lm)['reason'] if (cm or lm) else None,
                      'beat_max': max((abs(c['beat_cents']) for c in chk), default=None),
                      'beat_rows': chk, 'locked': locked,
-                     'in_scope': in_scope, 'passing': passing, 'status': status,
+                     'in_scope': in_scope, 'passing': passing,
+                     'round_done': round_done or locked, 'status': status,
                      'order': pos[m] + 1})
 
     # 重开事件 (未解决)
     reopens = []
     rid2idx = {r['id']: r['idx'] for r in rounds}
-    for d in _reopen_events(con, jid, targets, tol_c, tol_b, latest):
+    for d in _reopen_events(con, jid, targets, tol_c, tol_b, tol_hz, latest, locks):
         reopens.append({'id': d['id'], 'm': d['m'],
                         'name': targets.get(d['m'], {}).get('name'),
                         'round_idx': rid2idx.get(d['round_id']),
                         'data': d['data']})
 
-    # 队列: 当前轮范围内未通过、未锁, 按调律顺序
+    # 队列: 当前轮范围内本轮未完成 (未在本轮测达标, 也未锁定), 按调律顺序
     queue = [k for k in sorted(keys, key=lambda k: k['order'])
-             if k['in_scope'] and not k['passing'] and not k['locked']]
+             if k['in_scope'] and not k['round_done']]
     done_n = sum(1 for k in keys if k['passing'] or k['locked'])
+    cur_done = sum(1 for k in keys if k['in_scope'] and k['round_done'])
 
     return {'job': {'id': j['id'], 'name': j['name'], 'phase': j['phase'],
                     'scheme_id': j['scheme_id'], 'session_id': j['session_id'],
@@ -566,6 +594,7 @@ def _job_detail(con, jid):
                              if cur else None,
             'keys': keys, 'queue': queue, 'reopens': reopens,
             'done_count': done_n, 'total': len(keys),
+            'cur_done': cur_done, 'cur_total': len(cur_scope),
             'locked_count': len(locks)}
 
 
@@ -705,14 +734,16 @@ def api_job_measure(jid):
                        'prev_cents': prev['cents'] if prev else None,
                        'new_cents': cents, 'tol': tol_c})
 
-    # 音程拍频越限: 重开已完成的"另一端"关联键 (锁定键只警告)
-    # 已有同类未解决事件时不重复记录
-    open_evs = _reopen_events(con, jid, targets, tol_c, tol_b, latest)
-    for pr in pair:
+    # 音程拍频越限: 只检查以本次测量键 m 为端点的音程 (关联键),
+    # 其他越限音程与本次测量无关, 不应进入待回查或改动返工统计。
+    # 已有同类未解决事件时不重复记录。
+    open_evs = _reopen_events(con, jid, targets, tol_c, tol_b, tol_hz, latest, locks)
+    incident = [pr for pr in pair if pr['lo'] == m or pr['hi'] == m]
+    for pr in incident:
         if not pr['over']:
             continue
         am = pr['hi'] if pr['lo'] == m else pr['lo']
-        if am == m or am not in cur['scope']:
+        if am not in cur['scope']:
             continue
         other = latest.get(am)
         if not other or abs(other['cents']) > tol_c:
@@ -768,19 +799,15 @@ def api_job_lock(jid):
     return jsonify(_job_detail(con, jid))
 
 
-def _failing_scope(con, j, targets, tol_c, tol_b, tol_hz):
-    """未达标键 + 与它们有音程关系的关联键, 排除锁定。"""
+def _failing_scope(con, j, targets, tol_c, tol_b, tol_hz, scope=None):
+    """未达标键 (含无测值) + 与它们有音程关系的关联键, 排除锁定。"""
     latest = _latest_meas(con, j['id'])
     locks = _locks(con, j['id'])
-    fmap = {m: r['f_meas'] for m, r in latest.items()}
-    _, pair = _beat_checks(targets, fmap, tol_b, tol_hz)
-    bad = {m for m, r in latest.items() if abs(r['cents']) > tol_c}
+    bad = _failing_now(targets, latest, {}, tol_c, tol_b, tol_hz)
     # 无测值的键也算未达标
     bad |= {m for m in targets if m not in latest}
-    for pr in pair:
-        if pr['over']:
-            bad.add(pr['lo'])
-            bad.add(pr['hi'])
+    if scope is not None:
+        bad &= set(scope)
     related = set(bad)
     for m in list(bad):
         for up, *_ in JOB_INTERVALS:
@@ -807,52 +834,66 @@ def api_job_advance(jid):
     cur = rounds[-1]
     now = time.time()
 
-    scope_missing = [m for m in cur['scope']
-                     if not con.execute(
-                         'SELECT 1 FROM job_meas WHERE job_id=? AND m=? LIMIT 1',
-                         (jid, m)).fetchone()
-                     and not con.execute(
-                         'SELECT 1 FROM job_locks WHERE job_id=? AND m=?',
-                         (jid, m)).fetchone()]
-    if scope_missing:
-        names = '、'.join(ac.note_name(m) for m in sorted(scope_missing)[:6])
-        return jsonify({'error': f'本轮还有 {len(scope_missing)} 键未测量/未锁定: {names}'}), 400
+    locks = _locks(con, jid)
+    # 本轮每键最新测值 (完成判定只认当前轮记录)
+    cur_meas = {}
+    for r in con.execute(
+            'SELECT * FROM job_meas WHERE job_id=? AND round_id=? ORDER BY id',
+            (jid, cur['id'])).fetchall():
+        cur_meas[r['m']] = dict(r)
+
+    missing = sorted(m for m in cur['scope']
+                     if m not in cur_meas and m not in locks)
+    if missing:
+        names = '、'.join(ac.note_name(m) for m in missing[:6])
+        kind = {'coarse': '粗调', 'fine': '精调', 'review': '复核'}[cur['kind']]
+        tail = '…' if len(missing) > 6 else ''
+        return jsonify({'error':
+            f'{kind}轮还有 {len(missing)} 个键未在本轮测量/锁定: {names}{tail}'}), 400
+
+    # 本轮全部测完后, 用最新测值判断本轮范围内仍未达标的键
+    latest = _latest_meas(con, jid)
+    failing = _failing_now(targets, latest, locks, tol_c, tol_b, tol_hz,
+                           scope=cur['scope'])
+
+    if failing and cur['kind'] == 'review':
+        return jsonify({'error':
+            f'复核轮已测完但仍有 {len(failing)} 个键未达标, 需返工后重新复核'}), 400
 
     con.execute('UPDATE job_rounds SET finished=? WHERE id=?', (now, cur['id']))
     nxt_scope = _failing_scope(con, j, targets, tol_c, tol_b, tol_hz)
 
     if j['phase'] == 'review':
-        if nxt_scope:
-            return jsonify({'error': '复核仍有未达标键, 需先处理'}), 400
-        # 冻结: 来源快照已在 source 列; 记录最终测值与状态, 阶段置 frozen
-        latest = _latest_meas(con, jid)
+        # 本轮未测完或未达标均已在上方拦截; 冻结来源快照、最终测值与状态
         final = {str(m): {'f_meas': r['f_meas'], 'cents': r['cents']}
                  for m, r in latest.items()}
         con.execute("INSERT INTO job_events(job_id,round_id,m,kind,data,ts) "
                     "VALUES(?,?,?,?,?,?)",
                     (jid, cur['id'], None, 'freeze',
-                     json.dumps({'final': final, 'rounds': len(rounds)},
+                     json.dumps({'final': final, 'rounds': len(rounds) + 1},
                                 ensure_ascii=False), now))
         con.execute("UPDATE jobs SET phase='frozen', updated=? WHERE id=?", (now, jid))
         con.commit()
         return jsonify(_job_detail(con, jid))
 
-    if not nxt_scope:
-        # 全部达标 → 进入复核 (全键复核)
-        new_idx, new_kind, phase = cur['idx'] + 1, 'review', 'review'
-        scope = sorted(targets)
+    # 粗调后必进精调 (即使全部达标也保留精调轮记录, 范围为空);
+    # 精调后仍有未达标 → 再开精调轮 (仅未达标及关联键); 全部达标 → 复核
+    if cur['kind'] == 'coarse':
+        new_kind, phase, scope = 'fine', 'fine', sorted(nxt_scope)
+    elif failing or nxt_scope:
+        new_kind, phase, scope = 'fine', 'fine', sorted(nxt_scope)
     else:
-        new_idx, new_kind, phase = cur['idx'] + 1, 'fine', 'fine'
-        scope = sorted(nxt_scope)
+        new_kind, phase, scope = 'review', 'review', sorted(targets)
     rc = con.execute(
         'INSERT INTO job_rounds(job_id,idx,kind,scope,started,finished) '
         'VALUES(?,?,?,?,?,?)',
-        (jid, new_idx, new_kind, json.dumps(scope), now, None))
+        (jid, cur['idx'] + 1, new_kind, json.dumps(scope), now, None))
     con.execute("UPDATE jobs SET phase=?, updated=? WHERE id=?", (phase, now, jid))
     con.execute("INSERT INTO job_events(job_id,round_id,m,kind,data,ts) "
                 "VALUES(?,?,?,?,?,?)",
                 (jid, rc.lastrowid, None, 'phase',
-                 json.dumps({'phase': phase, 'scope_n': len(scope)}), now))
+                 json.dumps({'phase': phase, 'scope_n': len(scope)},
+                            ensure_ascii=False), now))
     con.commit()
     return jsonify(_job_detail(con, jid))
 
