@@ -37,12 +37,53 @@
   </div>
   <div class="row small">
     <button id="btn-add-key" class="ghost">+ 添加琴键</button>
-    <span class="hint">仅需输入有测量值的键; 基频或分音留空即可。</span>
+    <span class="hint">仅需输入有测量值的键; 基频或分音留空即可。带 <b>🎤 N</b> 标记的行可点「实测」查看浏览器采集结果。</span>
+  </div>
+</section>
+
+<section class="panel cap-panel">
+  <div class="panel-h">
+    <h2>② 浏览器实测采集</h2>
+    <div class="cap-keysel">
+      <label>当前琴键
+        <select id="cap-key"></select></label>
+      <button id="btn-mic">启用麦克风</button>
+      <span id="mic-status" class="hint">未启用 —— 可继续手工录入</span>
+    </div>
+  </div>
+
+  <div class="cap-grid">
+    <div class="cap-left">
+      <canvas id="cap-spectrum"></canvas>
+      <canvas id="cap-pitch"></canvas>
+      <div class="cap-controls">
+        <button id="btn-rec" disabled>① 点选琴键后录单次击弦</button>
+        <button id="btn-accept" class="hidden" disabled>保留为候选测量</button>
+        <button id="btn-discard" class="ghost hidden">丢弃本次</button>
+        <span id="cap-phase" class="hint"></span>
+      </div>
+      <div class="cap-meters">
+        <div><span>输入电平</span><div class="meter"><div id="m-level" class="bar"></div></div><b id="v-level">—</b></div>
+        <div><span>信噪比</span><div class="meter"><div id="m-snr" class="bar snr"></div></div><b id="v-snr">—</b></div>
+        <div><span>稳定时长</span><div class="meter"><div id="m-stable" class="bar stable"></div></div><b id="v-stable">—</b></div>
+        <div><span>削波</span><div class="meter clip"><div id="m-clip" class="bar clip"></div></div><b id="v-clip">—</b></div>
+      </div>
+      <ul id="cap-gates" class="cap-gates"></ul>
+    </div>
+    <div class="cap-right">
+      <h3>本键测量 (<span id="cap-note-name">—</span>)</h3>
+      <div id="cap-aggregate" class="cap-agg hint">尚无合格测量</div>
+      <ul id="cap-takes" class="cap-takes"><li class="muted">启用麦克风后点「录单次击弦」。不合格的录音不会写入, 可重录。</li></ul>
+      <div class="cap-confirm">
+        <label id="cap-write-l"><input id="cap-write" type="checkbox" checked> 将选中分音中位数写回输入表并立即重算</label>
+        <button id="btn-confirm">确认写回输入表</button>
+      </div>
+    </div>
   </div>
 </section>
 
 <section class="panel cfg-panel">
-  <h2>② 匹配规则与延伸方案</h2>
+  <h2>③ 匹配规则与延伸方案</h2>
   <div class="cfg-grid">
     <div class="cfg-block">
       <h3>八度匹配</h3>
@@ -78,7 +119,7 @@
 
 <section class="panel curve-panel">
   <div class="panel-h">
-    <h2>③ 调律曲线</h2>
+    <h2>④ 调律曲线</h2>
     <div class="legend">
       <span><i class="lg curve"></i>目标音分偏移</span>
       <span><i class="lg meas"></i>实测</span>
@@ -94,7 +135,7 @@
 
 <section class="panel kb-panel">
   <div class="panel-h">
-    <h2>④ 键盘 · 音程试听 · 拍频</h2>
+    <h2>⑤ 键盘 · 音程试听 · 拍频</h2>
     <div class="beat-box">
       <label>音程
         <select id="interval">
@@ -105,6 +146,7 @@
           <option value="5">纯四度 4:3</option>
         </select></label>
       <label><input id="use-partials" type="checkbox" checked> 带分音合成</label>
+      <label class="cap-mode"><input id="cap-pick-mode" type="checkbox"> 点键选作采集键 (不发声)</label>
       <span id="beat-readout" class="beat-readout">—</span>
     </div>
   </div>
@@ -113,13 +155,13 @@
 </section>
 
 <section class="panel conflict-panel">
-  <h2>⑤ 冲突定位</h2>
+  <h2>⑥ 冲突定位</h2>
   <ul id="conflict-list"><li class="muted">计算后在此列出。</li></ul>
 </section>
 
 <section class="panel cand-panel">
   <div class="panel-h">
-    <h2>⑥ 候选方案排序</h2>
+    <h2>⑦ 候选方案排序</h2>
     <label>排序依据
       <select id="cand-sort">
         <option value="composite">综合评分</option>
@@ -136,7 +178,7 @@
 
 <section class="panel version-panel">
   <div class="panel-h">
-    <h2>⑦ 版本与检查卡</h2>
+    <h2>⑧ 版本与检查卡</h2>
     <div>
       <input id="scheme-name" type="text" placeholder="版本名 (如 v1-平衡)" class="inline">
       <button id="btn-commit">保留当前为版本</button>
@@ -150,6 +192,7 @@
 
 <div id="toast"></div>
 <script src="/static/js/audio.js"></script>
+<script src="/static/js/capture.js"></script>
 <script src="/static/js/app.js"></script>
 </body>
 </html>

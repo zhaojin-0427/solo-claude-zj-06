@@ -12,7 +12,7 @@ const svgEl = (tag, attrs = {}) => {
 };
 
 const state = {
-  keys: new Map(),              // m -> { measures: {n: f} }
+  keys: new Map(),              // m -> { measures: {n: f}, captures: [测量] }
   pweights: Object.fromEntries([...Array(7)].map((_, i) => [i + 2, 1])),
   result: null,
   locks: new Map(),             // m -> cents (拖过的)
@@ -21,6 +21,14 @@ const state = {
   sessionId: null,
   schemes: [],                  // {id,name,cfg,result}
   compareId: null,
+};
+
+// 采集模块需要访问的接口
+window.PianoApp = {
+  state, cfg, buildInput,
+  renderInputTable: () => renderInputTable(),
+  renderCapSel: () => renderKeyboardCapSel(),
+  scheduleAnalyze: (...a) => scheduleAnalyze(...a),
 };
 
 function toast(msg, bad = false) {
@@ -42,11 +50,20 @@ const post = async (url, body) => {
 
 // --------------------------------------------------------------- 输入
 
+// 会话保存用: 录音缓冲只存在浏览器内存, 不进 JSON
+function captureSummary(c) {
+  if (!c) return null;
+  const {_buf, ...rest} = c;
+  return rest;
+}
 function buildInput() {
   return {
     name: $('#piano-name').value,
     a4: parseFloat($('#a4').value) || 440,
-    keys: [...state.keys.entries()].map(([m, k]) => ({m, measures: k.measures})),
+    keys: [...state.keys.entries()].map(([m, k]) => ({
+      m, measures: k.measures,
+      captures: (k.captures || []).map(captureSummary),
+    })),
     pweights: state.pweights,
     locks: [...state.locks].map(([m, cents]) => ({m, cents})),
   };
@@ -92,8 +109,11 @@ function renderInputTable() {
         value="${v != null ? v : ''}"></td>`;
     }
     const rk = state.result?.keys.find(x => x.m === m);
+    const ncap = (k.captures || []).length;
     cells += `<td class="bfit">${rk?.fitted ? rk.B.toExponential(2) : '—'}</td>
-              <td><button class="del" title="删除">×</button></td>`;
+              <td class="acts">
+                <button class="capgo" title="浏览器实测采集">🎤${ncap ? `<i>${ncap}</i>` : ''}</button>
+                <button class="del" title="删除">×</button></td>`;
     tr.innerHTML = cells;
     tr.querySelectorAll('input').forEach(inp => {
       inp.addEventListener('input', e => {
@@ -104,10 +124,16 @@ function renderInputTable() {
         scheduleAnalyze();
       });
     });
+    tr.querySelector('.capgo').addEventListener('click', () => {
+      window.PianoCapture?.selectKey(m);
+      document.querySelector('.cap-panel').scrollIntoView({behavior: 'smooth'});
+    });
     tr.querySelector('.del').addEventListener('click', () => {
       state.keys.delete(m);
       state.locks.delete(m);
       renderInputTable();
+      if (window.PianoCapture)
+        window.PianoCapture.selectKey(+($('#cap-key')?.value || A4));
       scheduleAnalyze();
     });
     tb.appendChild(tr);
@@ -127,7 +153,7 @@ $('#btn-add-key').addEventListener('click', () => {
   const m = parseInt(prompt('MIDI 键号 (21–108), A4=69', '69'));
   if (!(m >= MIDI_MIN && m <= MIDI_MAX)) return;
   if (!state.keys.has(m)) {
-    state.keys.set(m, {measures: {}});
+    state.keys.set(m, {measures: {}, captures: []});
     renderInputTable();
   }
 });
@@ -278,7 +304,6 @@ function renderKeyboard() {
   const bad = new Set();
   if (state.result)
     state.result.conflicts.forEach(c => c.notes.forEach(n => bad.add(n)));
-
   for (let m = MIDI_MIN; m <= MIDI_MAX; m++) {
     if ([1,3,6,8,10].includes(m % 12)) continue;
     const wi = whiteIndex(m);
@@ -304,6 +329,7 @@ function renderKeyboard() {
     r.addEventListener('click', e => { e.stopPropagation(); onKeyClick(m); });
     svg.appendChild(r);
   }
+  renderKeyboardCapSel();
 }
 
 function renderKeyboardLocks() {
@@ -327,11 +353,26 @@ function keyInfo(m) { return state.result?.keys.find(k => k.m === m); }
 // +5=纯四度(4:3) +7=纯五度(3:2) +12=八度(2:1) +19=十二度(3:1) +24=双八度(4:1)
 const PARTIAL_PAIR = {5: [4, 3], 7: [3, 2], 12: [2, 1], 19: [3, 1], 24: [4, 1]};
 
-// 用户点击: 同一根音再点 → 停止; 否则 (重新) 开始播放
+// 用户点击: 采集选键模式下只切换采集面板的琴键; 同一根音再点 → 停止; 否则播放
 function onKeyClick(m) {
+  if ($('#cap-pick-mode').checked) {
+    window.PianoCapture?.selectKey(m);
+    const r = $('#keyboard').getBoundingClientRect();
+    document.querySelector('.cap-panel')
+      .scrollIntoView({behavior: 'smooth', block: 'nearest'});
+    renderKeyboardCapSel();
+    return;
+  }
   if (!state.result) { toast('请先载入数据并计算'); return; }
   if (state.playing && state.playing.root === m) { stopPlay(); return; }
   startPlay(m);
+}
+
+function renderKeyboardCapSel() {
+  const on = $('#cap-pick-mode')?.checked;
+  const sel = +$('#cap-key')?.value;
+  $$('#keyboard rect[data-m]').forEach(r =>
+    r.classList.toggle('capsel', on && +r.dataset.m === sel));
 }
 
 // 程序化启动/刷新播放 (不触发"同根即停")
@@ -407,6 +448,7 @@ function renderAll() {
   renderInputTable();
   renderConflicts();
   $('#lock-count').textContent = state.locks.size;
+  window.PianoCapture?.refreshCurrentEffects();
   if (state.playing) startPlay(state.playing.root);  // 参数变了: 用新目标频率重启并刷新拍频
 }
 
@@ -553,7 +595,10 @@ function hydrate(s) {
   const inp = s.input;
   $('#a4').value = inp.a4;
   state.keys = new Map((inp.keys || []).map(k =>
-    [k.m, {measures: Object.fromEntries(Object.entries(k.measures || {}).map(([n, v]) => [+n, v]))}]));
+    [k.m, {
+      measures: Object.fromEntries(Object.entries(k.measures || {}).map(([n, v]) => [+n, v])),
+      captures: (k.captures || []).map(c => ({...c, use: c.use || {}, _buf: null})),
+    }]));
   state.locks = new Map((inp.locks || []).map(l => [l.m, l.cents]));
   state.pweights = Object.fromEntries(Object.entries(inp.pweights || {}).map(([n, v]) => [+n, +v]));
   state.schemes = (s.schemes || []).map(x => ({
@@ -561,6 +606,7 @@ function hydrate(s) {
   renderWeights();
   renderInputTable();
   renderSchemeList();
+  window.PianoCapture?.selectKey(+($('#cap-key')?.value || A4));
   analyze();
 }
 
@@ -633,7 +679,8 @@ $('#btn-demo').addEventListener('click', async () => {
   const d = await (await fetch(`/api/demo?a4=${$('#a4').value || 440}`)).json();
   $('#piano-name').value = d.name;
   state.keys = new Map(d.keys.map(k =>
-    [k.m, {measures: Object.fromEntries(Object.entries(k.measures).map(([n, v]) => [+n, v]))}]));
+    [k.m, {measures: Object.fromEntries(Object.entries(k.measures).map(([n, v]) => [+n, v])),
+           captures: []}]));
   state.locks = new Map();
   state.schemes = []; state.compareId = null; state.sessionId = null;
   renderSchemeList();
@@ -648,3 +695,5 @@ renderCurve();
 renderKeyboard();
 attachCurveEvents($('#curve'));
 loadSessionList();
+
+$('#cap-pick-mode').addEventListener('change', renderKeyboardCapSel);

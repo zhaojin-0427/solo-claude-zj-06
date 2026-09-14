@@ -180,6 +180,72 @@ def api_checkcard():
     return jsonify({'cards': cards, 'conflicts': r['conflicts']})
 
 
+@app.route('/api/measure-effects', methods=['POST'])
+def api_measure_effects():
+    """预览浏览器采集的候选分音对该键 B 与目标音分的影响。
+
+    variants: [{"id": "BASE"|"ALL"|"测量id", "measures": {分音序号: 频率},
+                "replace": bool}];
+    replace=True 时用 measures 替换该键; 否则把该键已有的其他测量合成值
+    (未被本变体覆盖的分音取其中位数) 并入后再跑完整分析。
+    """
+    import copy
+    body = request.get_json(force=True)
+    inp = body.get('input') or {}
+    cfg = body.get('cfg') or {}
+    m = int(body['m'])
+
+    # 该键既有测量 (input.keys 中的 measures 为已写回值)
+    existing = {}
+    for k in inp.get('keys', []):
+        if int(k['m']) == m:
+            existing = {int(n): float(f) for n, f in (k.get('measures') or {}).items()
+                        if f}
+
+    def med_by_partial(captures, skip_id=None):
+        vals = {}
+        for t in captures:
+            if skip_id and str(t.get('id')) == str(skip_id):
+                continue
+            if t.get('excluded'):
+                continue
+            use = t.get('use') or {}
+            for ns, p in (t.get('partials') or {}).items():
+                n = int(ns)
+                if use.get(str(n)) is False or use.get(n) is False:
+                    continue
+                vals.setdefault(n, []).append(float(p['f']))
+        return {n: sorted(v)[len(v) // 2] for n, v in vals.items() if v}
+
+    captures = next((k.get('captures') or [] for k in inp.get('keys', [])
+                     if int(k['m']) == m), [])
+    out = []
+    for v in body.get('variants') or []:
+        inp2 = copy.deepcopy(inp)
+        keys = [k for k in inp2.get('keys', []) if int(k['m']) != m]
+        measures = {int(n): float(f) for n, f in (v.get('measures') or {}).items()
+                    if f}
+        if not v.get('replace', True) and captures:
+            base = med_by_partial(captures, skip_id=v.get('id'))
+            for n, f in base.items():
+                measures.setdefault(n, f)
+        elif not v.get('replace') and existing:
+            for n, f in existing.items():
+                measures.setdefault(n, f)
+        if measures:
+            keys.append({'m': m, 'measures': measures})
+        inp2['keys'] = keys
+        r = run_analysis(inp2, cfg)
+        if 'error' in r:
+            out.append({'id': v.get('id'), 'ok': False, 'error': r['error']})
+            continue
+        kk = next(k for k in r['keys'] if k['m'] == m)
+        out.append({'id': v.get('id'), 'ok': True, 'B': kk['B'],
+                    'fitted': kk['fitted'], 'cents': kk['cents'],
+                    'f_target': kk['f_target']})
+    return jsonify(out)
+
+
 @app.route('/api/sessions', methods=['GET', 'POST'])
 def api_sessions():
     con = db()

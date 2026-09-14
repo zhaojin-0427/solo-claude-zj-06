@@ -1,9 +1,10 @@
-// Web Audio: 带非谐分音的双音合成
+// Web Audio: 带非谐分音的双音合成; 采集模块复用同一 AudioContext
 (function () {
   let ctx = null, master = null;
   let liveNodes = [];
 
-  function ac() {
+  window.PianoAudio = {};
+  window.PianoAudio.ac = function () {
     if (!ctx) {
       ctx = new (window.AudioContext || window.webkitAudioContext)();
       master = ctx.createGain();
@@ -13,7 +14,9 @@
     }
     if (ctx.state === 'suspended') ctx.resume();
     return ctx;
-  }
+  };
+  // 兼容旧调用 ac()
+  function ac() { return window.PianoAudio.ac(); }
 
   function amp(n) {
     const base = [1, 0.62, 0.42, 0.28, 0.18, 0.12, 0.08, 0.05];
@@ -44,7 +47,7 @@
     }
   }
 
-  window.PianoAudio = {
+  Object.assign(window.PianoAudio, {
     // 播两个音; b: 低音键参与拍频的分音, p: 高音键分音
     playPair(f1a, Ba, f1b, Bb, b = 2, p = 1, usePartials = true) {
       this.stop();
@@ -66,6 +69,18 @@
       this.stop();
       playNote(f1, usePartials ? B : 0, ac().currentTime + 0.02, 2.4, 1.0);
     },
+    // 回放采集到的稳定片段 (AudioBuffer)
+    playBuffer(buffer) {
+      const c = ac();
+      this.stop();
+      const src = c.createBufferSource();
+      src.buffer = buffer;
+      const g = c.createGain();
+      g.gain.value = 1.0;
+      src.connect(g); g.connect(master);
+      src.start();
+      liveNodes.push(src);
+    },
     stop() {
       for (const n of liveNodes) {
         try {
@@ -75,5 +90,5 @@
       }
       liveNodes = [];
     },
-  };
+  });
 })();
