@@ -82,6 +82,38 @@ def init_db():
       data TEXT, ts REAL
     );
     CREATE INDEX IF NOT EXISTS idx_job_meas ON job_meas(job_id, m);
+    CREATE TABLE IF NOT EXISTS retests(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT, status TEXT,               -- pending|collecting|confirmed
+      source TEXT,                          -- 来源快照: 冻结作业 + 完工基线
+      job_id INTEGER,
+      tol_cents REAL,                       -- 漂移容差 (音分)
+      tol_beat_cents REAL, tol_beat_hz REAL,
+      created REAL, updated REAL
+    );
+    CREATE TABLE IF NOT EXISTS retest_rounds(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      retest_id INTEGER, idx INTEGER,
+      label TEXT, planned_ts REAL,          -- 复测时点 (计划)
+      temp REAL, humidity REAL,             -- 室温 / 湿度
+      started REAL, finished REAL
+    );
+    CREATE TABLE IF NOT EXISTS retest_meas(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      retest_id INTEGER, round_id INTEGER, m INTEGER,
+      f_meas REAL, cents REAL,              -- cents 相对完工基线
+      ts REAL
+    );
+    CREATE TABLE IF NOT EXISTS retest_locks(
+      retest_id INTEGER, m INTEGER, ts REAL,
+      PRIMARY KEY (retest_id, m)
+    );
+    CREATE TABLE IF NOT EXISTS retest_events(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      retest_id INTEGER, round_id INTEGER, m INTEGER, kind TEXT,
+      data TEXT, ts REAL
+    );
+    CREATE INDEX IF NOT EXISTS idx_rt_meas ON retest_meas(retest_id, round_id, m);
     """)
     con.commit()
     con.close()
@@ -975,6 +1007,619 @@ def api_job_compare(jid):
                                 'scope_n': len(r['scope'])} for r in rounds],
                     'rows': rows, 'tol_cents': tol_c,
                     'tol_beat_cents': tol_b, 'tol_beat_hz': tol_hz})
+
+
+# ---------------------------------------------------------------- 音准稳定性复测
+
+RT_DEFAULT_TOL_CENTS = 3.0     # 复测漂移容差 (音分)
+RT_JUMP_MIN = 2.0              # 单键突变阈值下限 (音分), 实际取 max(2*tol, 此值)
+RT_REGION_MIN = 3              # 同音区成片漂移最少连续键数
+
+
+def _get_retest(con, rid):
+    row = con.execute('SELECT * FROM retests WHERE id=?', (rid,)).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d['source'] = json.loads(d['source']) if d['source'] else {}
+    return d
+
+
+def _rt_rounds(con, rid):
+    return [dict(r) for r in con.execute(
+        'SELECT * FROM retest_rounds WHERE retest_id=? ORDER BY idx',
+        (rid,)).fetchall()]
+
+
+def _rt_meas(con, rid):
+    """{round_id: {m: row}} — 同键同轮多次录入取最新一条。"""
+    out = {}
+    for r in con.execute(
+            'SELECT * FROM retest_meas WHERE retest_id=? ORDER BY id', (rid,)):
+        out.setdefault(r['round_id'], {})[r['m']] = dict(r)
+    return out
+
+
+def _rt_locks(con, rid):
+    return {r['m'] for r in
+            con.execute('SELECT m FROM retest_locks WHERE retest_id=?', (rid,))}
+
+
+def _rt_active(rounds):
+    return next((r for r in rounds if r['started'] and not r['finished']), None)
+
+
+def _sign_runs(vals, thresh, min_len):
+    """vals: {m: v}; 连续同号且 |v|>thresh 的键段 (长度 ≥ min_len)。"""
+    runs, cur, cur_sign = [], [], 0
+    for m in range(MIDI_MIN, MIDI_MAX + 1):
+        v = vals.get(m)
+        s = 0 if v is None or abs(v) <= thresh else (1 if v > 0 else -1)
+        if s and s == cur_sign:
+            cur.append(m)
+        else:
+            if len(cur) >= min_len:
+                runs.append(cur)
+            cur = [m] if s else []
+            cur_sign = s
+    if len(cur) >= min_len:
+        runs.append(cur)
+    return runs
+
+
+def _group_consecutive(flagged):
+    """{m: payload} → 相邻键 (步进 1) 归并成 [(keys, payloads)]。"""
+    groups, cur = [], []
+    for m in range(MIDI_MIN, MIDI_MAX + 1):
+        if m in flagged:
+            cur.append(m)
+        elif cur:
+            groups.append(cur)
+            cur = []
+    if cur:
+        groups.append(cur)
+    return [(g, [flagged[m] for m in g]) for g in groups]
+
+
+def _rt_anomalies(considered, meas, baseline, tol_c, beats):
+    """异常识别: 同音区成片漂移 / 单键突变 / 持续偏移 / 回稳。
+
+    considered: 有测值的复测轮 (按 idx 排序); 以最后一轮为当前观察面。
+    """
+    out = []
+    if not considered:
+        return out
+    latest = considered[-1]
+    lid = latest['id']
+    lmeas = meas.get(lid, {})
+    drifts = {m: cents_between(baseline[m], r['f_meas'])
+              for m, r in lmeas.items()}
+    if len(considered) >= 2:
+        prev_r = considered[-2]
+        prev_map = {m: r['f_meas'] for m, r in meas.get(prev_r['id'], {}).items()}
+    else:
+        prev_r = None
+        prev_map = baseline
+    deltas = {m: cents_between(prev_map[m], r['f_meas'])
+              for m, r in lmeas.items() if m in prev_map}
+    pairs = beats.get(lid, [])
+
+    def env_of(r):
+        return {'temp': r['temp'], 'humidity': r['humidity']} if r else \
+               {'temp': None, 'humidity': None}
+
+    d_temp = d_hum = None
+    if prev_r and latest['temp'] is not None and prev_r['temp'] is not None:
+        d_temp = latest['temp'] - prev_r['temp']
+    if prev_r and latest['humidity'] is not None and prev_r['humidity'] is not None:
+        d_hum = latest['humidity'] - prev_r['humidity']
+
+    def add(kind, keys, data):
+        keys = sorted(keys)
+        ks = set(keys)
+        intervals = [{'lo': p['lo'], 'hi': p['hi'], 'name': p['name'],
+                      'beat': p['beat'], 'beat_cents': p['beat_cents'],
+                      'limit': p['limit']}
+                     for p in pairs if p['over'] and (p['lo'] in ks or p['hi'] in ks)]
+        out.append({'id': f"{kind}-{latest['idx']}-{keys[0]}", 'kind': kind,
+                    'keys': keys, 'round_id': lid, 'round_idx': latest['idx'],
+                    'round_label': latest['label'],
+                    'env': {'cur': env_of(latest), 'prev': env_of(prev_r),
+                            'd_temp': d_temp, 'd_humidity': d_hum},
+                    'intervals': intervals, 'data': data})
+
+    # 1) 同音区成片漂移: 当前轮相对完工值同向超差的连续键段
+    for run in _sign_runs(drifts, tol_c, RT_REGION_MIN):
+        vals = [drifts[m] for m in run]
+        add('region', run, {'n': len(run), 'mean': sum(vals) / len(vals),
+                            'max': max(vals, key=abs),
+                            'direction': 'sharp' if vals[0] > 0 else 'flat'})
+
+    # 2) 单键突变: 相邻两次复测间剧变, 且不属于同向成片移动
+    jump_th = max(2.0 * tol_c, RT_JUMP_MIN)
+    in_shift = set()
+    for run in _sign_runs(deltas, jump_th, RT_REGION_MIN):
+        in_shift.update(run)
+    sudden = {m: deltas[m] for m in sorted(deltas)
+              if abs(deltas[m]) > jump_th and m not in in_shift}
+    for g, vals in _group_consecutive(sudden):
+        add('sudden', g, {'deltas': {str(m): v for m, v in zip(g, vals)},
+                          'thresh': jump_th})
+
+    if len(considered) >= 2:
+        # 各键逐轮相对完工漂移序列
+        seqs = {}
+        for m in range(MIDI_MIN, MIDI_MAX + 1):
+            seq = []
+            for r in considered:
+                mm = meas.get(r['id'], {}).get(m)
+                if mm:
+                    seq.append((r['idx'], cents_between(baseline[m], mm['f_meas'])))
+            seqs[m] = seq
+
+        # 3) 持续偏移: 截至当前轮连续 ≥2 轮同向超差
+        trail = {}
+        for m, seq in seqs.items():
+            run, sign = 0, 0
+            for _, d in reversed(seq):
+                s = 0 if abs(d) <= tol_c else (1 if d > 0 else -1)
+                if s and (not sign or s == sign):
+                    sign, run = s, run + 1
+                else:
+                    break
+            if run >= 2:
+                trail[m] = {'sign': sign, 'rounds': run, 'latest': seq[-1][1]}
+        for g, vals in _group_consecutive(trail):
+            add('persistent', g,
+                {'rounds': max(v['rounds'] for v in vals),
+                 'mean_latest': sum(v['latest'] for v in vals) / len(vals),
+                 'direction': 'sharp' if vals[0]['sign'] > 0 else 'flat'})
+
+        # 4) 回稳: 曾超差, 当前轮回到容差内
+        stab = {}
+        for m, seq in seqs.items():
+            if len(seq) < 2 or abs(seq[-1][1]) > tol_c:
+                continue
+            worst_idx, worst = max(seq[:-1], key=lambda x: abs(x[1]))
+            if abs(worst) > tol_c:
+                stab[m] = {'worst': worst, 'worst_idx': worst_idx,
+                           'now': seq[-1][1]}
+        for g, vals in _group_consecutive(stab):
+            w = max(vals, key=lambda v: abs(v['worst']))
+            add('restabilize', g, {'worst': w['worst'], 'worst_idx': w['worst_idx'],
+                                   'now': sum(v['now'] for v in vals) / len(vals)})
+
+    kind_order = {'region': 0, 'sudden': 1, 'persistent': 2, 'restabilize': 3}
+    out.sort(key=lambda a: (kind_order[a['kind']], a['keys'][0]))
+    return out
+
+
+def _rt_retune(targets, baseline, lmeas, pairs, locks, tol_c, pos):
+    """回调清单: 超差键 (漂移/拍频) + 关联键, 排除锁定, 按调律顺序。"""
+    drifts = {m: cents_between(baseline[m], r['f_meas'])
+              for m, r in lmeas.items()}
+    beat_bad = set()
+    for p in pairs:
+        if p['over']:
+            beat_bad.add(p['lo'])
+            beat_bad.add(p['hi'])
+    core = ({m for m, d in drifts.items() if abs(d) > tol_c} | beat_bad) - locks
+    related = set()
+    for m in core:
+        for up, *_ in JOB_INTERVALS:
+            for am in (m - up, m + up):
+                if am in targets and am not in core:
+                    related.add(am)
+    related -= locks
+    entries = []
+    for m in sorted(core | related, key=lambda x: pos[x]):
+        d = drifts.get(m)
+        mm = lmeas.get(m)
+        is_core = m in core
+        reasons = []
+        if is_core:
+            if d is not None and abs(d) > tol_c:
+                reasons.append('偏离')
+            if m in beat_bad:
+                reasons.append('拍频')
+        else:
+            reasons.append('关联')
+        entries.append({'m': m, 'name': targets[m]['name'], 'order': pos[m] + 1,
+                        'kind': 'core' if is_core else 'related',
+                        'drift': d, 'f_now': mm['f_meas'] if mm else None,
+                        'f_base': baseline[m],
+                        'adjust': -d if (is_core and d is not None) else None,
+                        'reasons': reasons})
+    return entries
+
+
+def _retest_detail(con, rid):
+    rt = _get_retest(con, rid)
+    if not rt:
+        return None
+    src = rt['source']
+    a4, targets = _job_targets(src['job_source'])
+    baseline = {int(m): float(f) for m, f in src['baseline'].items()}
+    tol_c = float(rt['tol_cents'])
+    tol_b = float(rt['tol_beat_cents'])
+    tol_hz = float(rt['tol_beat_hz'])
+    rounds = _rt_rounds(con, rid)
+    meas = _rt_meas(con, rid)
+    locks = _rt_locks(con, rid)
+    active = _rt_active(rounds)
+    considered = [r for r in rounds if meas.get(r['id'])]
+    latest_r = considered[-1] if considered else None
+
+    # 各轮音程拍频 (八度/十二度/双八度)
+    beats = {}
+    for r in considered:
+        fmap = {m: mm['f_meas'] for m, mm in meas[r['id']].items()}
+        _, pair = _beat_checks(targets, fmap, tol_b, tol_hz)
+        beats[r['id']] = pair
+
+    anomalies = _rt_anomalies(considered, meas, baseline, tol_c, beats)
+
+    order = tuning_order()
+    pos = {m: i for i, m in enumerate(order)}
+    keys = []
+    for m in range(MIDI_MIN, MIDI_MAX + 1):
+        t = targets.get(m)
+        if not t:
+            continue
+        series = []
+        prev_f = baseline[m]
+        for r in rounds:
+            mm = meas.get(r['id'], {}).get(m)
+            if not mm:
+                series.append(None)
+                continue
+            drift = cents_between(baseline[m], mm['f_meas'])
+            delta = cents_between(prev_f, mm['f_meas'])
+            series.append({'round_id': r['id'], 'idx': r['idx'],
+                           'f': mm['f_meas'], 'drift': drift, 'delta': delta,
+                           'ts': mm['ts']})
+            prev_f = mm['f_meas']
+        done = [s for s in series if s]
+        keys.append({'m': m, 'name': t['name'], 'f_target': t['f_target'],
+                     'target_cents': t['cents'], 'B': t['B'],
+                     'f_base': baseline[m], 'series': series,
+                     'latest': done[-1] if done else None,
+                     'locked': m in locks})
+
+    retune = []
+    if latest_r:
+        retune = _rt_retune(targets, baseline, meas[latest_r['id']],
+                            beats[latest_r['id']], locks, tol_c, pos)
+
+    return {'retest': {'id': rt['id'], 'name': rt['name'], 'status': rt['status'],
+                       'job_id': rt['job_id'], 'job_name': src.get('job_name'),
+                       'a4': a4, 'tol_cents': tol_c, 'tol_beat_cents': tol_b,
+                       'tol_beat_hz': tol_hz,
+                       'created': rt['created'], 'updated': rt['updated']},
+            'rounds': [{'id': r['id'], 'idx': r['idx'], 'label': r['label'],
+                        'planned_ts': r['planned_ts'], 'temp': r['temp'],
+                        'humidity': r['humidity'], 'started': r['started'],
+                        'finished': r['finished'],
+                        'n_meas': len(meas.get(r['id'], {}))} for r in rounds],
+            'active_round': active['id'] if active else None,
+            'keys': keys, 'anomalies': anomalies,
+            'beats': {str(qid): p for qid, p in beats.items()},
+            'retune': retune, 'locks': sorted(locks),
+            'view_round': latest_r['id'] if latest_r else None}
+
+
+@app.route('/api/retests', methods=['GET', 'POST'])
+def api_retests():
+    con = db()
+    if request.method == 'POST':
+        body = request.get_json(force=True)
+        jid = int(body['job_id'])
+        j = _get_job(con, jid)
+        if not j:
+            return jsonify({'error': '来源作业不存在'}), 404
+        if j['phase'] != 'frozen':
+            return jsonify({'error': '仅已冻结的调律作业可作为复测来源'}), 400
+        # 完工基线: 冻结事件中的最终测值, 缺测键退回目标频率
+        ev = con.execute(
+            "SELECT data FROM job_events WHERE job_id=? AND kind='freeze' "
+            'ORDER BY id DESC LIMIT 1', (jid,)).fetchone()
+        final = json.loads(ev['data']).get('final', {}) if ev else {}
+        a4, targets = _job_targets(j['source'])
+        baseline = {}
+        for m, t in targets.items():
+            fm = final.get(str(m))
+            baseline[str(m)] = float(fm['f_meas']) \
+                if fm and fm.get('f_meas') else t['f_target']
+        src = {'job_id': jid, 'job_name': j['name'], 'a4': a4,
+               'job_source': j['source'], 'baseline': baseline,
+               'frozen_ts': j['updated']}
+        now = time.time()
+        cur = con.execute(
+            'INSERT INTO retests(name,status,source,job_id,tol_cents,'
+            'tol_beat_cents,tol_beat_hz,created,updated) '
+            'VALUES(?,?,?,?,?,?,?,?,?)',
+            (body.get('name') or f"{j['name']} · 稳定性复测", 'pending',
+             json.dumps(src), jid,
+             float(body.get('tol_cents', RT_DEFAULT_TOL_CENTS)),
+             float(body.get('tol_beat_cents',
+                            j['source'].get('tol_beat_cents',
+                                            DEFAULT_TOL_BEAT_CENTS))),
+             float(body.get('tol_beat_hz',
+                            j['source'].get('tol_beat_hz',
+                                            DEFAULT_TOL_BEAT_HZ))),
+             now, now))
+        rid = cur.lastrowid
+        for i, r in enumerate(body.get('rounds') or [], 1):
+            con.execute(
+                'INSERT INTO retest_rounds(retest_id,idx,label,planned_ts) '
+                'VALUES(?,?,?,?)',
+                (rid, i, r.get('label') or f'第{i}次复测', r.get('planned_ts')))
+        con.commit()
+        return jsonify({'id': rid})
+    rows = con.execute('SELECT * FROM retests ORDER BY id DESC').fetchall()
+    out = []
+    for r in rows:
+        src = json.loads(r['source'] or '{}')
+        nfin = con.execute(
+            'SELECT COUNT(*) FROM retest_rounds '
+            'WHERE retest_id=? AND finished IS NOT NULL',
+            (r['id'],)).fetchone()[0]
+        nall = con.execute(
+            'SELECT COUNT(*) FROM retest_rounds WHERE retest_id=?',
+            (r['id'],)).fetchone()[0]
+        out.append({'id': r['id'], 'name': r['name'], 'status': r['status'],
+                    'job_name': src.get('job_name'), 'tol_cents': r['tol_cents'],
+                    'n_rounds': nall, 'n_finished': nfin,
+                    'created': r['created'], 'updated': r['updated']})
+    return jsonify(out)
+
+
+@app.route('/api/retests/<int:rid>')
+def api_retest(rid):
+    con = db()
+    d = _retest_detail(con, rid)
+    if not d:
+        return jsonify({'error': 'not found'}), 404
+    return jsonify(d)
+
+
+@app.route('/api/retests/<int:rid>/rounds', methods=['POST'])
+def api_rt_add_round(rid):
+    """添加复测时点 (静置后的计划时间)。"""
+    con = db()
+    rt = _get_retest(con, rid)
+    if not rt:
+        return jsonify({'error': 'not found'}), 404
+    if rt['status'] == 'confirmed':
+        return jsonify({'error': '档案已确认冻结, 新一轮复测请复制档案'}), 400
+    body = request.get_json(force=True)
+    rounds = _rt_rounds(con, rid)
+    idx = (rounds[-1]['idx'] + 1) if rounds else 1
+    con.execute(
+        'INSERT INTO retest_rounds(retest_id,idx,label,planned_ts) '
+        'VALUES(?,?,?,?)',
+        (rid, idx, body.get('label') or f'第{idx}次复测', body.get('planned_ts')))
+    con.execute('UPDATE retests SET updated=? WHERE id=?', (time.time(), rid))
+    con.commit()
+    return jsonify(_retest_detail(con, rid))
+
+
+@app.route('/api/retests/<int:rid>/rounds/<int:qid>', methods=['DELETE'])
+def api_rt_del_round(rid, qid):
+    con = db()
+    rt = _get_retest(con, rid)
+    if not rt:
+        return jsonify({'error': 'not found'}), 404
+    if rt['status'] == 'confirmed':
+        return jsonify({'error': '档案已确认冻结'}), 400
+    r = next((x for x in _rt_rounds(con, rid) if x['id'] == qid), None)
+    if not r:
+        return jsonify({'error': '复测时点不存在'}), 404
+    if r['started']:
+        return jsonify({'error': '该轮已开始, 不可删除'}), 400
+    con.execute('DELETE FROM retest_rounds WHERE id=?', (qid,))
+    con.execute('UPDATE retests SET updated=? WHERE id=?', (time.time(), rid))
+    con.commit()
+    return jsonify(_retest_detail(con, rid))
+
+
+@app.route('/api/retests/<int:rid>/activate', methods=['POST'])
+def api_rt_activate(rid):
+    """开始一个计划中的复测轮 (同时记录室温/湿度)。"""
+    con = db()
+    rt = _get_retest(con, rid)
+    if not rt:
+        return jsonify({'error': 'not found'}), 404
+    if rt['status'] == 'confirmed':
+        return jsonify({'error': '档案已确认冻结, 新一轮复测请复制档案'}), 400
+    body = request.get_json(force=True)
+    qid = int(body['round_id'])
+    rounds = _rt_rounds(con, rid)
+    r = next((x for x in rounds if x['id'] == qid), None)
+    if not r:
+        return jsonify({'error': '复测时点不存在'}), 404
+    if r['started']:
+        return jsonify({'error': '该轮已开始'}), 400
+    if _rt_active(rounds):
+        return jsonify({'error': '已有进行中的复测轮, 请先完成本轮'}), 400
+    now = time.time()
+    con.execute(
+        'UPDATE retest_rounds SET started=?, temp=?, humidity=? WHERE id=?',
+        (now, body.get('temp'), body.get('humidity'), qid))
+    con.execute("UPDATE retests SET status='collecting', updated=? WHERE id=?",
+                (now, rid))
+    con.execute(
+        "INSERT INTO retest_events(retest_id,round_id,m,kind,data,ts) "
+        "VALUES(?,?,?,'activate',?,?)",
+        (rid, qid, None,
+         json.dumps({'temp': body.get('temp'),
+                     'humidity': body.get('humidity')}), now))
+    con.commit()
+    return jsonify(_retest_detail(con, rid))
+
+
+@app.route('/api/retests/<int:rid>/env', methods=['POST'])
+def api_rt_env(rid):
+    """更新进行中复测轮的室温/湿度。"""
+    con = db()
+    rt = _get_retest(con, rid)
+    if not rt:
+        return jsonify({'error': 'not found'}), 404
+    if rt['status'] != 'collecting':
+        return jsonify({'error': '当前状态不可记录环境'}), 400
+    active = _rt_active(_rt_rounds(con, rid))
+    if not active:
+        return jsonify({'error': '没有进行中的复测轮'}), 400
+    body = request.get_json(force=True)
+    con.execute('UPDATE retest_rounds SET temp=?, humidity=? WHERE id=?',
+                (body.get('temp'), body.get('humidity'), active['id']))
+    con.execute('UPDATE retests SET updated=? WHERE id=?', (time.time(), rid))
+    con.commit()
+    return jsonify(_retest_detail(con, rid))
+
+
+@app.route('/api/retests/<int:rid>/measure', methods=['POST'])
+def api_rt_measure(rid):
+    """录入当前轮某键频率 (浏览器采集带入或手工录入)。"""
+    con = db()
+    rt = _get_retest(con, rid)
+    if not rt:
+        return jsonify({'error': 'not found'}), 404
+    if rt['status'] == 'confirmed':
+        return jsonify({'error': '档案已确认冻结, 测值不可再改'}), 400
+    if rt['status'] != 'collecting':
+        return jsonify({'error': '档案尚未开始复测, 请先开始一个复测轮'}), 400
+    active = _rt_active(_rt_rounds(con, rid))
+    if not active:
+        return jsonify({'error': '没有进行中的复测轮, 请先开始本轮'}), 400
+    body = request.get_json(force=True)
+    m = int(body['m'])
+    f = float(body['f_meas'])
+    baseline = {int(k): float(v) for k, v in
+                rt['source'].get('baseline', {}).items()}
+    if m not in baseline or f <= 0:
+        return jsonify({'error': '无效琴键或频率'}), 400
+    cents = cents_between(baseline[m], f)
+    now = time.time()
+    con.execute(
+        'INSERT INTO retest_meas(retest_id,round_id,m,f_meas,cents,ts) '
+        'VALUES(?,?,?,?,?,?)',
+        (rid, active['id'], m, f, cents, now))
+    con.execute('UPDATE retests SET updated=? WHERE id=?', (now, rid))
+    con.commit()
+    return jsonify(_retest_detail(con, rid))
+
+
+@app.route('/api/retests/<int:rid>/finish', methods=['POST'])
+def api_rt_finish(rid):
+    """完成当前轮: 需 88 键全部测齐。"""
+    con = db()
+    rt = _get_retest(con, rid)
+    if not rt:
+        return jsonify({'error': 'not found'}), 404
+    if rt['status'] != 'collecting':
+        return jsonify({'error': '当前状态不可完成复测轮'}), 400
+    rounds = _rt_rounds(con, rid)
+    active = _rt_active(rounds)
+    if not active:
+        return jsonify({'error': '没有进行中的复测轮'}), 400
+    n = con.execute(
+        'SELECT COUNT(DISTINCT m) FROM retest_meas WHERE round_id=?',
+        (active['id'],)).fetchone()[0]
+    total = MIDI_MAX - MIDI_MIN + 1
+    if n < total:
+        return jsonify({'error': f'本轮还有 {total - n} 个键未测量'}), 400
+    now = time.time()
+    con.execute('UPDATE retest_rounds SET finished=? WHERE id=?',
+                (now, active['id']))
+    con.execute(
+        "INSERT INTO retest_events(retest_id,round_id,m,kind,data,ts) "
+        "VALUES(?,?,?,'finish',?,?)",
+        (rid, active['id'], None, json.dumps({'n_meas': n}), now))
+    con.execute('UPDATE retests SET updated=? WHERE id=?', (now, rid))
+    con.commit()
+    return jsonify(_retest_detail(con, rid))
+
+
+@app.route('/api/retests/<int:rid>/lock', methods=['POST'])
+def api_rt_lock(rid):
+    """锁定/解锁无需调整的键 (不进回调清单)。"""
+    con = db()
+    rt = _get_retest(con, rid)
+    if not rt:
+        return jsonify({'error': 'not found'}), 404
+    if rt['status'] == 'confirmed':
+        return jsonify({'error': '档案已确认冻结, 判断不可再改'}), 400
+    body = request.get_json(force=True)
+    m = int(body['m'])
+    now = time.time()
+    if body.get('locked', True):
+        con.execute(
+            'INSERT OR IGNORE INTO retest_locks(retest_id,m,ts) VALUES(?,?,?)',
+            (rid, m, now))
+        kind = 'lock'
+    else:
+        con.execute('DELETE FROM retest_locks WHERE retest_id=? AND m=?',
+                    (rid, m))
+        kind = 'unlock'
+    con.execute(
+        "INSERT INTO retest_events(retest_id,round_id,m,kind,data,ts) "
+        "VALUES(?,?,?,?,'{}',?)",
+        (rid, None, m, kind, now))
+    con.execute('UPDATE retests SET updated=? WHERE id=?', (now, rid))
+    con.commit()
+    return jsonify(_retest_detail(con, rid))
+
+
+@app.route('/api/retests/<int:rid>/confirm', methods=['POST'])
+def api_rt_confirm(rid):
+    """确认复测结论: 冻结全部测值与判断 (异常识别 + 回调清单快照)。"""
+    con = db()
+    rt = _get_retest(con, rid)
+    if not rt:
+        return jsonify({'error': 'not found'}), 404
+    if rt['status'] != 'collecting':
+        return jsonify({'error': '仅采集中的档案可确认'}), 400
+    rounds = _rt_rounds(con, rid)
+    if _rt_active(rounds):
+        return jsonify({'error': '还有进行中的复测轮, 请先完成本轮'}), 400
+    finished = [r for r in rounds if r['finished']]
+    if not finished:
+        return jsonify({'error': '尚无已完成的复测轮, 无法确认'}), 400
+    d = _retest_detail(con, rid)
+    now = time.time()
+    con.execute(
+        "INSERT INTO retest_events(retest_id,round_id,m,kind,data,ts) "
+        "VALUES(?,?,?,'freeze',?,?)",
+        (rid, None, None,
+         json.dumps({'anomalies': d['anomalies'], 'retune': d['retune'],
+                     'locks': d['locks'],
+                     'rounds': [r['id'] for r in finished]},
+                    ensure_ascii=False), now))
+    con.execute("UPDATE retests SET status='confirmed', updated=? WHERE id=?",
+                (now, rid))
+    con.commit()
+    return jsonify(_retest_detail(con, rid))
+
+
+@app.route('/api/retests/<int:rid>/copy', methods=['POST'])
+def api_rt_copy(rid):
+    """确认后复制档案: 同一来源快照与容差, 全新复测轮次。"""
+    con = db()
+    rt = _get_retest(con, rid)
+    if not rt:
+        return jsonify({'error': 'not found'}), 404
+    if rt['status'] != 'confirmed':
+        return jsonify({'error': '仅已确认的档案可复制'}), 400
+    now = time.time()
+    cur = con.execute(
+        'INSERT INTO retests(name,status,source,job_id,tol_cents,'
+        'tol_beat_cents,tol_beat_hz,created,updated) '
+        "VALUES(?,'pending',?,?,?,?,?,?,?)",
+        (f"{rt['name']} (新一轮)", json.dumps(rt['source']), rt['job_id'],
+         rt['tol_cents'], rt['tol_beat_cents'], rt['tol_beat_hz'], now, now))
+    con.commit()
+    return jsonify({'id': cur.lastrowid})
 
 
 init_db()

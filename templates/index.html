@@ -272,6 +272,93 @@
     </div>
   </div>
 </section>
+
+<section class="panel rt-panel">
+  <div class="panel-h">
+    <h2>⑩ 音准稳定性复测</h2>
+    <div class="rt-top">
+      <select id="rt-select"><option value="">选择复测档案…</option></select>
+      <button id="btn-rt-new" class="ghost">从已冻结作业建立…</button>
+      <span id="rt-status" class="rt-status"></span>
+    </div>
+  </div>
+
+  <div id="rt-empty" class="hint">以 ⑨ 中已冻结的调律作业为来源建立复测档案, 按 待复测 → 采集中 → 已确认 流转。
+    调律师设置静置后的复测时点与音分容差; 每轮记录室温/湿度, 经 ② 浏览器采集或手工录入 88 键频率。
+    系统逐键计算相对完工值与相邻复测的漂移, 复查八度/十二度/双八度拍频, 识别成片漂移、单键突变、持续偏移与回稳;
+    确认后冻结全部测值与判断, 新一轮复测须复制档案。</div>
+
+  <div id="rt-body" class="hidden">
+    <div class="rt-bar">
+      <span id="rt-source" class="hint"></span>
+      <span id="rt-tol" class="hint"></span>
+      <span class="rt-add">
+        <input id="rt-label" type="text" placeholder="时点名称 如 静置24h">
+        <input id="rt-planned" type="datetime-local" title="计划复测时间">
+        <button id="btn-rt-addround" class="ghost">+ 复测时点</button>
+      </span>
+      <button id="btn-rt-confirm">确认结论并冻结</button>
+    </div>
+
+    <div id="rt-rounds" class="rt-rounds"></div>
+
+    <div class="rt-grid">
+      <div class="rt-main">
+        <div class="rt-cap">
+          <span id="rt-view-cap"></span>
+          <span class="rt-legend">
+            <span><i class="rk flat"></i>偏低</span>
+            <span><i class="rk zero"></i>±容差</span>
+            <span><i class="rk sharp"></i>偏高</span>
+            <span><i class="rk none"></i>未测</span>
+            <span><i class="rk lock"></i>锁定</span>
+          </span>
+        </div>
+        <svg id="rt-heatmap" viewBox="0 0 1100 120" preserveAspectRatio="none"></svg>
+        <svg id="rt-curve" viewBox="0 0 1100 240" preserveAspectRatio="none"></svg>
+        <div class="rt-cap"><span class="hint">时间曲线: 粗线=选中键, 细线=八度/十二度/双八度关联键, 红色=异常键; 点击列标题切换热图轮次; 阴影带=±容差。</span></div>
+
+        <div id="rt-keycard" class="rt-keycard hidden">
+          <div class="rk-head">
+            <div><b id="rkc-name">—</b> <span id="rkc-sub" class="hint"></span></div>
+            <div class="rk-actions">
+              <button id="btn-rkc-lock" class="ghost" title="锁定为无需调整, 不进回调清单">🔒 锁定免调</button>
+              <button id="btn-rkc-capture" class="ghost" title="到 ② 采集面板录该键">🎤 去采集</button>
+            </div>
+          </div>
+          <div id="rkc-series" class="rkc-series"></div>
+          <div id="rkc-beats" class="rkc-beats"></div>
+          <div class="rk-input" id="rkc-input">
+            <label>实测 f₁ (Hz)
+              <input id="rkc-f" type="number" step="any" placeholder="手工录入"></label>
+            <button id="btn-rkc-take" class="ghost">带入采集中位数</button>
+            <label id="rkc-live" class="rk-live">漂移 —</label>
+            <button id="btn-rkc-send">记录到本轮</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="rt-side">
+        <h3>异常识别 <span id="rt-anom-n" class="hint"></span></h3>
+        <ul id="rt-anoms" class="rt-anoms"></ul>
+        <div id="rt-anom-detail" class="rt-anom-detail hidden"></div>
+        <h3>回调清单 <span id="rt-retune-n" class="hint"></span></h3>
+        <div class="rt-retune-bar">
+          <label class="hint"><input id="rt-only-core" type="checkbox"> 只看待回调</label>
+          <button id="btn-rt-text" class="ghost">文本清单</button>
+        </div>
+        <ul id="rt-retune" class="rt-retune"></ul>
+        <textarea id="rt-text" class="rt-text hidden" readonly></textarea>
+      </div>
+    </div>
+
+    <div id="rt-frozen" class="rt-frozen hidden">
+      <b>✓ 已确认冻结</b>
+      <span class="hint">全部测值与判断已冻结; 新一轮复测须复制档案。</span>
+      <button id="btn-rt-copy">复制档案 (新一轮复测)</button>
+    </div>
+  </div>
+</section>
 </main>
 
 <div id="toast"></div>
@@ -279,5 +366,6 @@
 <script src="/static/js/capture.js"></script>
 <script src="/static/js/app.js"></script>
 <script src="/static/js/jobs.js"></script>
+<script src="/static/js/retest.js"></script>
 </body>
 </html>
